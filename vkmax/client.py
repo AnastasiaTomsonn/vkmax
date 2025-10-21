@@ -193,7 +193,7 @@ class MaxClient:
         )
 
         if "error" in start_auth_response["payload"]:
-            raise Exception(start_auth_response["payload"]["error"])
+            raise Exception(start_auth_response["payload"]["localizedMessage"])
 
         return start_auth_response["payload"]["token"]
 
@@ -214,7 +214,7 @@ class MaxClient:
         )
 
         if "error" in verification_response["payload"]:
-            raise Exception(verification_response["payload"]["error"])
+            raise Exception(verification_response["payload"]["localizedMessage"])
 
         if "passwordChallenge" in verification_response["payload"].keys():
             return verification_response
@@ -243,7 +243,7 @@ class MaxClient:
         )
 
         if "error" in verification_response["payload"]:
-            raise Exception(verification_response["payload"]["error"])
+            raise Exception(verification_response["payload"]["localizedMessage"])
 
         try:
             phone = verification_response["payload"]["profile"]["phone"]
@@ -276,7 +276,7 @@ class MaxClient:
         )
 
         if "error" in login_response["payload"]:
-            raise Exception(login_response["payload"]["error"])
+            raise Exception(login_response["payload"]["localizedMessage"])
 
         try:
             phone = login_response["payload"]["profile"]["phone"]
