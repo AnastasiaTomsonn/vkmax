@@ -197,6 +197,34 @@ class MaxClient:
         if "error" in verification_response["payload"]:
             raise Exception(verification_response["payload"]["error"])
 
+        if "passwordChallenge" in verification_response["payload"].keys():
+            return verification_response
+
+        try:
+            phone = verification_response["payload"]["profile"]["phone"]
+        except:
+            phone = '[?]'
+            _logger.warning('Got no phone number in server response')
+        _logger.info(f'Successfully logged in as {phone}')
+
+        self._is_logged_in = True
+        await self._start_keepalive_task()
+
+        return verification_response
+
+    @ensure_connected
+    async def sing_in_password(self, track_id: str, password: str):
+        verification_response = await self.invoke_method(
+            opcode=115,
+            payload={
+                "trackId": track_id,
+                "password": password
+            }
+        )
+
+        if "error" in verification_response["payload"]:
+            raise Exception(verification_response["payload"]["error"])
+
         try:
             phone = verification_response["payload"]["profile"]["phone"]
         except:
