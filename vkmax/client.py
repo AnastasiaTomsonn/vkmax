@@ -56,7 +56,7 @@ class MaxClient:
     @handle_errors
     async def connect(self):
         if self._connection:
-            raise Exception("Already connected")
+            return self._connection
 
         _logger.info(f'Connecting to {WS_HOST}...')
         self._connection = await websockets.connect(
@@ -143,14 +143,14 @@ class MaxClient:
     @ensure_connected
     async def _start_keepalive_task(self):
         if self._keepalive_task:
-            raise Exception('Keepalive task already started')
+            return
 
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         return
 
     async def _stop_keepalive_task(self):
         if not self._keepalive_task:
-            raise Exception('Keepalive task is not running')
+            return
 
         self._keepalive_task.cancel()
         self._keepalive_task = None
@@ -253,7 +253,6 @@ class MaxClient:
         _logger.info(f'Successfully logged in as {phone}')
 
         self._is_logged_in = True
-        await self._start_keepalive_task()
 
         return verification_response
 
