@@ -28,6 +28,19 @@ def ensure_connected(method: Callable):
     return wrapper
 
 
+def handle_errors(method: Callable):
+    @wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            result = await method(self, *args, **kwargs)
+            return {"status": True, "result": result}
+        except Exception as e:
+            _logger.error(f"{method.__name__} ERROR: {e}")
+            return {"status": False, "message": str(e)}
+
+    return wrapper
+
+
 class MaxClient:
     def __init__(self):
         self._connection: Optional[ClientConnection] = None
@@ -40,7 +53,7 @@ class MaxClient:
         self._cached_chats = None
 
     # --- WebSocket connection management ---
-
+    @handle_errors
     async def connect(self):
         if self._connection:
             raise Exception("Already connected")
@@ -165,6 +178,7 @@ class MaxClient:
             }
         )
 
+    @handle_errors
     @ensure_connected
     async def send_code(self, phone: str) -> str:
         """:returns: Login token."""
@@ -177,8 +191,13 @@ class MaxClient:
                 "language": "ru"
             }
         )
+
+        if "error" in start_auth_response["payload"]:
+            raise Exception(start_auth_response["payload"]["error"])
+
         return start_auth_response["payload"]["token"]
 
+    @handle_errors
     @ensure_connected
     async def sign_in(self, sms_token: str, sms_code: int):
         """
@@ -212,6 +231,7 @@ class MaxClient:
 
         return verification_response
 
+    @handle_errors
     @ensure_connected
     async def sing_in_password(self, track_id: str, password: str):
         verification_response = await self.invoke_method(
@@ -237,6 +257,7 @@ class MaxClient:
 
         return verification_response
 
+    @handle_errors
     @ensure_connected
     async def login_by_token(self, token: str):
         await self._send_hello_packet()
@@ -275,6 +296,38 @@ class MaxClient:
         await self._start_keepalive_task()
 
         return login_response
+
+    @handle_errors
+    @ensure_connected
+    async def logout(self):
+        if not self._connection:
+            _logger.warning("Logout called but no active connection.")
+            return
+
+        try:
+            try:
+                await self.invoke_method(
+                    opcode=20,
+                    payload={}
+                )
+            except Exception as e:
+                _logger.warning(f"Server logout request failed: {e}")
+
+            if self._keepalive_task:
+                await self._stop_keepalive_task()
+
+            await self._connection.close()
+
+            self._connection = None
+            self._is_logged_in = False
+            self._cached_chats = None
+            self._pending.clear()
+
+            _logger.info("Logout successful, connection closed and state cleared.")
+
+        except Exception as e:
+            _logger.error(f"LOGOUT_ERROR: {e}")
+            raise
 
     def get_cached_chats(self):
         """
