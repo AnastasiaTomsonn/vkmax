@@ -36,7 +36,7 @@ def handle_errors(method: Callable):
             return {"status": True, "result": result}
         except Exception as e:
             _logger.error(f"{method.__name__} ERROR: {e}")
-            return {"status": False, "message": str(e)}
+            return {"status": False, "message": e}
 
     return wrapper
 
