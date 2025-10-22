@@ -51,6 +51,7 @@ class MaxClient:
         self._incoming_event_callback = None
         self._pending = {}
         self._cached_chats = None
+        self._cached_contacts = None
 
     # --- WebSocket connection management ---
     @handle_errors
@@ -286,9 +287,16 @@ class MaxClient:
 
         # Cache chats from login response
         if "chats" in login_response["payload"]:
-            self._cached_chats = login_response
+            self._cached_chats = login_response["payload"]["chats"]
             _logger.info(
                 f"Cached {len(login_response['payload']['chats'])} chats from login"
+            )
+
+        # Cache chats from login response
+        if "contacts" in login_response["payload"]:
+            self._cached_contacts = login_response["payload"]["contacts"]
+            _logger.info(
+                f"Cached {len(login_response['payload']['contacts'])} chats from login"
             )
 
         self._is_logged_in = True
@@ -334,3 +342,10 @@ class MaxClient:
         Returns the full login response containing chats, or None if not available.
         """
         return self._cached_chats
+
+    def get_cached_contacts(self):
+        """
+        Get chats that were cached during login.
+        Returns the full login response containing chats, or None if not available.
+        """
+        return self._cached_contacts
