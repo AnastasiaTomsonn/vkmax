@@ -50,6 +50,19 @@ async def get_chat(
     )
 
 
+async def get_chat_by_ids(
+        client: MaxClient,
+        chat_ids: list[int],
+):
+    payload = {
+        "chatIds": chat_ids
+    }
+    return await client.invoke_method(
+        opcode=48,
+        payload=payload,
+    )
+
+
 async def get_chat_messages(
         client: MaxClient,
         chat_id: int,
