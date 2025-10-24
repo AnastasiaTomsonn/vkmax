@@ -3,10 +3,10 @@ from vkmax.client import MaxClient
 
 
 async def send_message(
-    client: MaxClient,
-    chat_id: int,
-    text: str,
-    notify: bool = True
+        client: MaxClient,
+        chat_id: int,
+        text: str,
+        notify: bool = True
 ):
     """Sends message to specified chat"""
 
@@ -26,10 +26,10 @@ async def send_message(
 
 
 async def edit_message(
-    client: MaxClient,
-    chat_id: int,
-    message_id: int,
-    text: str
+        client: MaxClient,
+        chat_id: int,
+        message_id: int,
+        text: str
 ):
     """Edits the specified message"""
 
@@ -44,11 +44,12 @@ async def edit_message(
         }
     )
 
+
 async def delete_message(
-    client: MaxClient,
-    chat_id: int,
-    message_ids: list,
-    delete_for_me: bool = False
+        client: MaxClient,
+        chat_id: int,
+        message_ids: list,
+        delete_for_me: bool = False
 ):
     """ Deletes the specified message """
 
@@ -61,11 +62,12 @@ async def delete_message(
         }
     )
 
+
 async def pin_message(
-    client: MaxClient,
-    chat_id: int,
-    message_id: int,
-    notify = False
+        client: MaxClient,
+        chat_id: int,
+        message_id: int,
+        notify=False
 ):
     """Pins message in the chat"""
 
@@ -80,14 +82,14 @@ async def pin_message(
 
 
 async def reply_message(
-    client: MaxClient,
-    chat_id: int,
-    text: str,
-    reply_to_message_id: int,
-    notify = True
+        client: MaxClient,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int,
+        notify=True
 ):
     """Replies to message in the chat"""
-    
+
     return await client.invoke_method(
         opcode=64,
         payload={
@@ -106,24 +108,24 @@ async def reply_message(
         }
     )
 
+
 async def send_photo(
         client: MaxClient,
         chat_id: int,
         image_path: str,
         caption: str,
         notify: bool = True
-    ):
-
+):
     """ Sends photo to specified chat """
 
     import requests
 
     photo_token = await client.invoke_method(
-        opcode = 80,
-        payload = {
+        opcode=80,
+        payload={
             "count": 1
         }
-    )    
+    )
 
     url = photo_token["payload"]["url"]
 
@@ -144,7 +146,7 @@ async def send_photo(
     try:
         with open(image_path, 'rb') as image_file:
             files = {
-                'file': ('image.jpg', image_file, 'image/jpeg') # that's not matter don't think about that lol
+                'file': ('image.jpg', image_file, 'image/jpeg')  # that's not matter don't think about that lol
             }
 
             uploaded_photo = requests.post(url, params=params, headers=headers, files=files)
@@ -157,7 +159,7 @@ async def send_photo(
 
     await client.invoke_method(
         opcode=64,
-        payload = {
+        payload={
             "chatId": chat_id,
             "message": {
                 "text": caption,
@@ -171,5 +173,35 @@ async def send_photo(
                 ]
             },
             "notify": notify
+        }
+    )
+
+
+async def reaction_message(
+        client: MaxClient,
+        chat_id: int,
+        message_id: str,
+        reaction: str = ""
+):
+    if not reaction:
+        """Remove the reaction"""
+        return await client.invoke_method(
+            opcode=179,
+            payload={
+                "chatId": chat_id,
+                "messageId": str(message_id)
+            }
+        )
+
+    """Add react to a message"""
+    return await client.invoke_method(
+        opcode=178,
+        payload={
+            "chatId": chat_id,
+            "messageId": str(message_id),
+            "reaction": {
+                "reactionType": "EMOJI",
+                "id": reaction,
+            }
         }
     )
