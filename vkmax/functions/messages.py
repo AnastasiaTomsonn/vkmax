@@ -1,3 +1,4 @@
+from io import BytesIO
 from random import randint
 from vkmax.client import MaxClient
 
@@ -144,18 +145,25 @@ async def send_photo(
     }
 
     try:
-        with open(image_path, 'rb') as image_file:
-            files = {
-                'file': ('image.jpg', image_file, 'image/jpeg')  # that's not matter don't think about that lol
-            }
+        resp = requests.get(image_path, timeout=15)
+        resp.raise_for_status()
 
-            uploaded_photo = requests.post(url, params=params, headers=headers, files=files)
-            uploaded_photo = uploaded_photo.json()
+        files = {
+            'file': ('image.jpg', BytesIO(resp.content), 'image/jpeg')  # that's not matter don't think about that lol
+        }
 
-    except FileNotFoundError:
-        print(f"Error: Make sure '{image_path}' is in the same directory.")
+        uploaded_photo = requests.post(url, params=params, headers=headers, files=files)
+        uploaded_photo.raise_for_status()
+        uploaded_photo = uploaded_photo.json()
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Image upload failed: {e}")
+        return
+
+    try:
+        photo_token_value = list(uploaded_photo['photos'].values())[0]['token']
+    except Exception as e:
+        print(f"Invalid upload response: {uploaded_photo} {e}")
+        return
 
     await client.invoke_method(
         opcode=64,
@@ -168,7 +176,7 @@ async def send_photo(
                 "attaches": [
                     {
                         "_type": "PHOTO",
-                        "photoToken": list(uploaded_photo['photos'].values())[0]['token']
+                        "photoToken": photo_token_value
                     }
                 ]
             },
