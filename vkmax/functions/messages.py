@@ -265,6 +265,83 @@ async def send_file(
     return response
 
 
+async def send_video(
+        client: MaxClient,
+        chat_id: int,
+        file_url: str,
+        notify: bool = True,
+        max_attempts: int = 5,
+        wait_seconds: float = 2.0
+):
+    """ Sends a file from a URL to the chat with waiting for file processing """
+    file_token = await client.invoke_method(
+        opcode=82,
+        payload={"count": 1}
+    )
+
+    info = file_token["payload"]["info"][0]
+    upload_url = info["url"]
+    video_id = info["videoId"]
+    api_token = info["token"]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Origin": "https://web.max.ru",
+        "Referer": "https://web.max.ru/",
+    }
+    params = {"apiToken": api_token}
+
+    try:
+        prep_file = await prepare_file(file_url)
+        file_name = prep_file["filename"]
+        mime_type = prep_file["mime_type"]
+        content = prep_file["content"]
+
+        data = aiohttp.FormData()
+        data.add_field("file", BytesIO(content), filename=file_name, content_type=mime_type)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(upload_url, headers=headers, params=params, data=data) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"File upload error: HTTP {resp.status}")
+                print("Upload successful")
+
+    except Exception as e:
+        print(f"File upload failed: {e}")
+        return
+
+    response = {}
+    for attempt in range(max_attempts):
+        response = await client.invoke_method(
+            opcode=64,
+            payload={
+                "chatId": chat_id,
+                "message": {
+                    "cid": randint(1750000000000, 2000000000000),
+                    "elements": [],
+                    "attaches": [{"_type": "VIDEO", "videoId": video_id, "token": api_token}],
+                },
+                "notify": notify
+            }
+        )
+
+        error = response.get("payload", {}).get("error")
+        if not error:
+            print("Message sent successfully ✅")
+            return response
+
+        if error == "attachment.not.ready":
+            print(f"The file is not ready yet, we are waiting {wait_seconds} s... (attempt {attempt + 1})")
+            await asyncio.sleep(wait_seconds)
+        else:
+            print("Unexpected error:", response)
+            return response
+
+    print("The file was never ready after all the attempts.")
+    return response
+
+
 async def prepare_file(file_url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(file_url) as resp:
