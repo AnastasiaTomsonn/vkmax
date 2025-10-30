@@ -366,6 +366,26 @@ async def send_video(client: MaxClient, chat_id: int, file_url: str, caption: st
     return response
 
 
+async def forward_message(client: MaxClient, chat_id: int, old_chat_id: int, message_id: int, notify=True):
+    return await client.invoke_method(
+        opcode=64,
+        payload={
+            "chatId": chat_id,
+            "message": {
+                "cid": randint(1750000000000, 2000000000000),
+                "elements": [],
+                "link": {
+                    "type": "FORWARD",
+                    "messageId": str(message_id),
+                    "chatId": old_chat_id
+                },
+                "attaches": []
+            },
+            "notify": notify
+        }
+    )
+
+
 async def prepare_file(file_url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(file_url) as resp:
@@ -423,3 +443,4 @@ async def file_uploader(upload_url, api_token, file_name, content, mime_type):
     except Exception as e:
         print(f"File upload failed: {e}")
         return False, {}
+
