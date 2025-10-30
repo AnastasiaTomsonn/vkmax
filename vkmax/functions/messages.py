@@ -30,6 +30,36 @@ async def send_message(
     )
 
 
+async def reaction_message(
+        client: MaxClient,
+        chat_id: int,
+        message_id: str,
+        reaction: str = ""
+):
+    if not reaction:
+        """Remove the reaction"""
+        return await client.invoke_method(
+            opcode=179,
+            payload={
+                "chatId": chat_id,
+                "messageId": str(message_id)
+            }
+        )
+
+    """Add react to a message"""
+    return await client.invoke_method(
+        opcode=178,
+        payload={
+            "chatId": chat_id,
+            "messageId": str(message_id),
+            "reaction": {
+                "reactionType": "EMOJI",
+                "id": reaction,
+            }
+        }
+    )
+
+
 async def edit_message(
         client: MaxClient,
         chat_id: int,
@@ -86,15 +116,91 @@ async def pin_message(
     )
 
 
-async def reply_message(
+async def reply_message_file(
         client: MaxClient,
         chat_id: int,
-        text: str,
         reply_to_message_id: int,
-        notify=True
+        file_path: str,
+        caption: str = "",
+        notify=True,
+        max_attempts: int = 5,
+        wait_seconds: float = 2.0
 ):
-    """Replies to message in the chat"""
+    attachment = {}
 
+    if not file_path:
+        return
+
+    prep_file = await prepare_file(file_path)
+    file_name = prep_file["filename"]
+    mime_type = prep_file["mime_type"]
+    content = prep_file["content"]
+
+    if mime_type.startswith("image"):
+        photo_token = await client.invoke_method(opcode=80, payload={"count": 1})
+        upload_url = photo_token["payload"]["url"]
+        api_token = upload_url.split("apiToken=")[1]
+        is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+        if not is_uploaded:
+            return
+        photo_token_value = list(uploaded_info.get('photos').values())[0].get('token')
+        attachment = {"_type": "PHOTO", "photoToken": photo_token_value}
+    elif mime_type.startswith("video"):
+        video_token = await client.invoke_method(opcode=82, payload={"count": 1})
+        info = video_token["payload"]["info"][0]
+        upload_url = info["url"]
+        video_id = info["videoId"]
+        api_token = info["token"]
+        is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+        if not is_uploaded:
+            return
+        attachment = {"_type": "VIDEO", "videoId": video_id, "token": api_token}
+
+    else:
+        file_token = await client.invoke_method(opcode=87, payload={"count": 1})
+        info = file_token["payload"]["info"][0]
+        upload_url = info["url"]
+        fileId = info["fileId"]
+        api_token = info["token"]
+        is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+        if not is_uploaded:
+            return
+        attachment = {"_type": "FILE", "fileId": fileId}
+
+    response = {}
+    for attempt in range(max_attempts):
+        response = await client.invoke_method(
+            opcode=64,
+            payload={
+                "chatId": chat_id,
+                "message": {
+                    "text": caption,
+                    "cid": randint(1750000000000, 2000000000000),
+                    "elements": [],
+                    "link": {
+                        "type": "REPLY",
+                        "messageId": str(reply_to_message_id)
+                    },
+                    "attaches": [attachment]
+                },
+                "notify": notify
+            }
+        )
+
+        error = response.get("payload", {}).get("error")
+        if not error:
+            return response
+        if error == "attachment.not.ready":
+            await asyncio.sleep(wait_seconds)
+        else:
+            print("Unexpected error:", response)
+            return response
+    print("The file was never ready after all the attempts.")
+    return response
+
+
+async def reply_message(client: MaxClient, chat_id: int, reply_to_message_id: int, text: str, notify=True):
+    """Replies to message in the chat"""
     return await client.invoke_method(
         opcode=64,
         payload={
@@ -114,124 +220,25 @@ async def reply_message(
     )
 
 
-async def send_photo(
-        client: MaxClient,
-        chat_id: int,
-        image_path: str,
-        caption: str,
-        notify: bool = True
-):
+async def send_photo(client: MaxClient, chat_id: int, image_url: str, caption: str = "", notify: bool = True,
+                     max_attempts: int = 5, wait_seconds: float = 2.0):
     """ Sends photo to specified chat (async, with prepare_file) """
+    if not image_url:
+        return
 
-    photo_token = await client.invoke_method(
-        opcode=80,
-        payload={
-            "count": 1
-        }
-    )
+    prep_file = await prepare_file(image_url)
+    file_name = prep_file["filename"]
+    mime_type = prep_file["mime_type"]
+    content = prep_file["content"]
 
+    photo_token = await client.invoke_method(opcode=80, payload={"count": 1})
     upload_url = photo_token["payload"]["url"]
     api_token = upload_url.split("apiToken=")[1]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Origin": "https://web.max.ru",
-        "Referer": "https://web.max.ru/",
-    }
-    params = {"apiToken": api_token}
-
-    try:
-        prep_file = await prepare_file(image_path)
-        file_name = prep_file["filename"]
-        mime_type = prep_file["mime_type"]
-        content = prep_file["content"]
-
-        data = aiohttp.FormData()
-        data.add_field("file", BytesIO(content), filename=file_name, content_type=mime_type)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(upload_url, headers=headers, params=params, data=data) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Ошибка загрузки фото: HTTP {resp.status}")
-                uploaded_photo = await resp.json()
-                print("Photo uploaded:", uploaded_photo)
-    except Exception as e:
-        print(f"Image upload failed: {e}")
+    is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+    if not is_uploaded:
         return
-
-    try:
-        photo_token_value = list(uploaded_photo['photos'].values())[0]['token']
-    except Exception as e:
-        print(f"Invalid upload response: {uploaded_photo} {e}")
-        return
-
-    return await client.invoke_method(
-        opcode=64,
-        payload={
-            "chatId": chat_id,
-            "message": {
-                "text": caption,
-                "cid": randint(1750000000000, 2000000000000),
-                "elements": [],
-                "attaches": [
-                    {
-                        "_type": "PHOTO",
-                        "photoToken": photo_token_value
-                    }
-                ]
-            },
-            "notify": notify
-        }
-    )
-
-
-async def send_file(
-        client: MaxClient,
-        chat_id: int,
-        file_url: str,
-        caption: str,
-        notify: bool = True,
-        max_attempts: int = 5,
-        wait_seconds: float = 2.0
-):
-    """ Sends a file from a URL to the chat with waiting for file processing """
-    file_token = await client.invoke_method(
-        opcode=87,
-        payload={"count": 1}
-    )
-
-    info = file_token["payload"]["info"][0]
-    upload_url = info["url"]
-    fileId = info["fileId"]
-    api_token = info["token"]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Origin": "https://web.max.ru",
-        "Referer": "https://web.max.ru/",
-    }
-    params = {"apiToken": api_token}
-
-    try:
-        prep_file = await prepare_file(file_url)
-        file_name = prep_file["filename"]
-        mime_type = prep_file["mime_type"]
-        content = prep_file["content"]
-
-        data = aiohttp.FormData()
-        data.add_field("file", BytesIO(content), filename=file_name, content_type=mime_type)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(upload_url, headers=headers, params=params, data=data) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"File upload error: HTTP {resp.status}")
-                print("Upload successful")
-
-    except Exception as e:
-        print(f"File upload failed: {e}")
-        return
+    photo_token_value = list(uploaded_info.get('photos').values())[0].get('token')
+    attachment = {"_type": "PHOTO", "photoToken": photo_token_value}
 
     response = {}
     for attempt in range(max_attempts):
@@ -243,7 +250,7 @@ async def send_file(
                     "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
                     "elements": [],
-                    "attaches": [{"_type": "FILE", "fileId": fileId}]
+                    "attaches": [attachment]
                 },
                 "notify": notify
             }
@@ -251,65 +258,36 @@ async def send_file(
 
         error = response.get("payload", {}).get("error")
         if not error:
-            print("Message sent successfully ✅")
             return response
-
         if error == "attachment.not.ready":
-            print(f"The file is not ready yet, we are waiting {wait_seconds} s... (attempt {attempt + 1})")
             await asyncio.sleep(wait_seconds)
         else:
             print("Unexpected error:", response)
             return response
-
     print("The file was never ready after all the attempts.")
     return response
 
 
-async def send_video(
-        client: MaxClient,
-        chat_id: int,
-        file_url: str,
-        notify: bool = True,
-        max_attempts: int = 5,
-        wait_seconds: float = 2.0
-):
+async def send_file(client: MaxClient, chat_id: int, file_url: str, caption: str = "",
+                    notify: bool = True, max_attempts: int = 5, wait_seconds: float = 2.0):
     """ Sends a file from a URL to the chat with waiting for file processing """
-    file_token = await client.invoke_method(
-        opcode=82,
-        payload={"count": 1}
-    )
+    if not file_url:
+        return
 
+    prep_file = await prepare_file(file_url)
+    file_name = prep_file["filename"]
+    mime_type = prep_file["mime_type"]
+    content = prep_file["content"]
+
+    file_token = await client.invoke_method(opcode=87, payload={"count": 1})
     info = file_token["payload"]["info"][0]
     upload_url = info["url"]
-    video_id = info["videoId"]
+    fileId = info["fileId"]
     api_token = info["token"]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Origin": "https://web.max.ru",
-        "Referer": "https://web.max.ru/",
-    }
-    params = {"apiToken": api_token}
-
-    try:
-        prep_file = await prepare_file(file_url)
-        file_name = prep_file["filename"]
-        mime_type = prep_file["mime_type"]
-        content = prep_file["content"]
-
-        data = aiohttp.FormData()
-        data.add_field("file", BytesIO(content), filename=file_name, content_type=mime_type)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(upload_url, headers=headers, params=params, data=data) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"File upload error: HTTP {resp.status}")
-                print("Upload successful")
-
-    except Exception as e:
-        print(f"File upload failed: {e}")
+    is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+    if not is_uploaded:
         return
+    attachment = {"_type": "FILE", "fileId": fileId}
 
     response = {}
     for attempt in range(max_attempts):
@@ -318,9 +296,10 @@ async def send_video(
             payload={
                 "chatId": chat_id,
                 "message": {
+                    "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
                     "elements": [],
-                    "attaches": [{"_type": "VIDEO", "videoId": video_id, "token": api_token}],
+                    "attaches": [attachment]
                 },
                 "notify": notify
             }
@@ -328,16 +307,61 @@ async def send_video(
 
         error = response.get("payload", {}).get("error")
         if not error:
-            print("Message sent successfully ✅")
             return response
-
         if error == "attachment.not.ready":
-            print(f"The file is not ready yet, we are waiting {wait_seconds} s... (attempt {attempt + 1})")
             await asyncio.sleep(wait_seconds)
         else:
             print("Unexpected error:", response)
             return response
+    print("The file was never ready after all the attempts.")
+    return response
 
+
+async def send_video(client: MaxClient, chat_id: int, file_url: str, caption: str = "", notify: bool = True,
+                     max_attempts: int = 5, wait_seconds: float = 2.0):
+    """ Sends a video from a URL to the chat with waiting for file processing """
+    if not file_url:
+        return
+
+    prep_file = await prepare_file(file_url)
+    file_name = prep_file["filename"]
+    mime_type = prep_file["mime_type"]
+    content = prep_file["content"]
+
+    video_token = await client.invoke_method(opcode=82, payload={"count": 1})
+    info = video_token["payload"]["info"][0]
+    upload_url = info["url"]
+    video_id = info["videoId"]
+    api_token = info["token"]
+    is_uploaded, uploaded_info = await file_uploader(upload_url, api_token, file_name, content, mime_type)
+    if not is_uploaded:
+        return
+    attachment = {"_type": "VIDEO", "videoId": video_id, "token": api_token}
+
+    response = {}
+    for attempt in range(max_attempts):
+        response = await client.invoke_method(
+            opcode=64,
+            payload={
+                "chatId": chat_id,
+                "message": {
+                    "text": caption,
+                    "cid": randint(1750000000000, 2000000000000),
+                    "elements": [],
+                    "attaches": [attachment]
+                },
+                "notify": notify
+            }
+        )
+
+        error = response.get("payload", {}).get("error")
+        if not error:
+            return response
+        if error == "attachment.not.ready":
+            await asyncio.sleep(wait_seconds)
+        else:
+            print("Unexpected error:", response)
+            return response
     print("The file was never ready after all the attempts.")
     return response
 
@@ -372,31 +396,30 @@ async def prepare_file(file_url: str):
             }
 
 
-async def reaction_message(
-        client: MaxClient,
-        chat_id: int,
-        message_id: str,
-        reaction: str = ""
-):
-    if not reaction:
-        """Remove the reaction"""
-        return await client.invoke_method(
-            opcode=179,
-            payload={
-                "chatId": chat_id,
-                "messageId": str(message_id)
-            }
-        )
+async def file_uploader(upload_url, api_token, file_name, content, mime_type):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Origin": "https://web.max.ru",
+        "Referer": "https://web.max.ru/",
+    }
+    params = {"apiToken": api_token}
+    try:
+        data = aiohttp.FormData()
+        data.add_field("file", BytesIO(content), filename=file_name, content_type=mime_type)
+        print(mime_type)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(upload_url, headers=headers, params=params, data=data) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"File upload error: HTTP {resp.status}")
+                print("Upload successful")
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    result = await resp.json()
+                else:
+                    result = await resp.text()
+                return True, result
 
-    """Add react to a message"""
-    return await client.invoke_method(
-        opcode=178,
-        payload={
-            "chatId": chat_id,
-            "messageId": str(message_id),
-            "reaction": {
-                "reactionType": "EMOJI",
-                "id": reaction,
-            }
-        }
-    )
+    except Exception as e:
+        print(f"File upload failed: {e}")
+        return False, {}
