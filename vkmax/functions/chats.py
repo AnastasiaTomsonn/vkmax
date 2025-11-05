@@ -130,3 +130,14 @@ async def leave_chat(client: MaxClient, chat_id: int):
 
 async def join_chat(client: MaxClient, link: str):
     return await client.invoke_method(opcode=57, payload={"link": link})
+
+
+async def pin_chat(client: MaxClient, chat_id: int, unpin: False):
+    import time
+    fav_index = int(time.time() * 1000) if unpin else 0
+
+    return await client.invoke_method(
+        opcode=22, payload={"settings": {
+            "chats": {str(chat_id): {"favIndex": fav_index}},
+        }}
+    )
