@@ -4,9 +4,9 @@ from typing import Optional
 
 
 async def create_group(
-    client: MaxClient,
-    group_name: str,
-    participant_ids: list[int]
+        client: MaxClient,
+        group_name: str,
+        participant_ids: list[int]
 ):
     """Creates a group"""
 
@@ -31,13 +31,13 @@ async def create_group(
 
 
 async def invite_users(
-    client: MaxClient,
-    group_id: int,
-    participant_ids: list[int],
-    show_history = True
+        client: MaxClient,
+        group_id: int,
+        participant_ids: list[int],
+        show_history=True
 ):
     """Invites users into group via userid"""
-    
+
     return await client.invoke_method(
         opcode=77,
         payload={
@@ -50,10 +50,10 @@ async def invite_users(
 
 
 async def remove_users(
-    client: MaxClient,
-    group_id: int,
-    participant_ids: list[int],
-    delete_messages: bool = False
+        client: MaxClient,
+        group_id: int,
+        participant_ids: list[int],
+        delete_messages: bool = False
 ):
     """Removes users from group via userid"""
     delete_messages = 0 if delete_messages == False else -1
@@ -70,12 +70,12 @@ async def remove_users(
 
 
 async def add_admin(
-    client: MaxClient,
-    group_id: int,
-    admin_ids: list[int],
-    deleting_messages: bool = False,
-    control_participants: bool = False,
-    control_admins: bool = False
+        client: MaxClient,
+        group_id: int,
+        admin_ids: list[int],
+        deleting_messages: bool = False,
+        control_participants: bool = False,
+        control_admins: bool = False
 ):
     """
     Adds an admin to group.
@@ -100,7 +100,7 @@ async def add_admin(
     permissions = 251 if deleting_messages == True and control_participants == True and control_admins == False else ...
     permissions = 254 if deleting_messages == False and control_participants == True and control_admins == True else ...
     permissions = 255 if deleting_messages == True and control_participants == True and control_admins == True else ...
-    
+
     return await client.invoke_method(
         opcode=77,
         payload={
@@ -114,15 +114,15 @@ async def add_admin(
 
 
 async def remove_admin(
-    client: MaxClient,
-    group_id: int,
-    admin_ids = list[int]
+        client: MaxClient,
+        group_id: int,
+        admin_ids=list[int]
 ):
     """
     Removes an admin from group.
     You need to be a group owner or administrator to use this method.
     """
-    
+
     return await client.invoke_method(
         opcode=77,
         payload={
@@ -135,11 +135,10 @@ async def remove_admin(
 
 
 async def transfer_group_ownership(
-    client: MaxClient, 
-    group_id: int,
-    new_owner_id: int
+        client: MaxClient,
+        group_id: int,
+        new_owner_id: int
 ):
-
     """Transfers ownership of the group to a new user"""
 
     return await client.invoke_method(
@@ -152,17 +151,17 @@ async def transfer_group_ownership(
 
 
 async def change_group_settings(
-    client: MaxClient,
-    group_id: int,
-    all_can_pin_message: bool = False,
-    only_owner_can_change_icon_title: bool = True,
-    only_admin_can_add_member: bool = True
+        client: MaxClient,
+        group_id: int,
+        all_can_pin_message: bool = False,
+        only_owner_can_change_icon_title: bool = True,
+        only_admin_can_add_member: bool = True
 ):
     """Changes basic group settings"""
 
     return await client.invoke_method(
         opcode=55,
-        payload = {
+        payload={
             "chatId": group_id,
             "options": {
                 "ONLY_OWNER_CAN_CHANGE_ICON_TITLE": only_owner_can_change_icon_title,
@@ -174,10 +173,10 @@ async def change_group_settings(
 
 
 async def change_group_profile(
-    client: MaxClient,
-    group_id: int,
-    new_group_name: Optional[str] = None,
-    new_description: Optional[str] = None
+        client: MaxClient,
+        group_id: int,
+        new_group_name: Optional[str] = None,
+        new_description: Optional[str] = None
 ):
     """Just changes a group public profile"""
     # TODO XXX Might cause a bug with theme being null. Need to test
@@ -200,14 +199,15 @@ async def change_group_profile(
                 "description": new_description
             }
         )
-    
+
     return
 
+
 async def get_group_members(
-    client: MaxClient,
-    group_id: int,
-    marker=0,
-    count=500
+        client: MaxClient,
+        group_id: int,
+        marker=0,
+        count=500
 ):
     """
     Gets all the members in specified chat.
@@ -220,7 +220,7 @@ async def get_group_members(
     return await client.invoke_method(
         opcode=59,
         payload={
-            "type":"MEMBER",
+            "type": "MEMBER",
             "marker": marker,
             "chatId": group_id,
             "count": count
@@ -229,8 +229,8 @@ async def get_group_members(
 
 
 async def resolve_group_by_link(
-    client: MaxClient,
-    link_hash: str
+        client: MaxClient,
+        link_hash: str
 ):
     """Gets group info by invite hash"""
     return await client.invoke_method(
@@ -242,8 +242,8 @@ async def resolve_group_by_link(
 
 
 async def join_group_by_link(
-    client: MaxClient,
-    link_hash: str
+        client: MaxClient,
+        link_hash: str
 ):
     """Join group by its invite hash"""
     data = await client.invoke_method(
@@ -280,11 +280,12 @@ async def join_group_by_link(
     )
     return
 
+
 async def react_to_message(
-    client: MaxClient,
-    group_id: int,
-    message_id: int,
-    reaction: str
+        client: MaxClient,
+        group_id: int,
+        message_id: int,
+        reaction: str
 ):
     """React to a message in a group"""
     await client.invoke_method(
@@ -292,9 +293,9 @@ async def react_to_message(
         payload={
             "chatId": group_id,
             "messageId": str(message_id),
-            "reaction":{
+            "reaction": {
                 "reactionType": "EMOJI",
-                "id":reaction,
+                "id": reaction,
             }
         }
     )
@@ -303,6 +304,6 @@ async def react_to_message(
         payload={
             "chatId": group_id,
             "messageId": str(message_id),
-            "count":100
-            }
+            "count": 100
+        }
     )

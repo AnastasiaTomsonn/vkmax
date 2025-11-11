@@ -3,8 +3,8 @@ from random import randint
 
 
 async def resolve_channel_username(
-    client: MaxClient, 
-    username: str
+        client: MaxClient,
+        username: str
 ):
     """Resolving channel by username"""
 
@@ -17,8 +17,8 @@ async def resolve_channel_username(
 
 
 async def resolve_channel_id(
-    client: MaxClient,
-    channel_id: int
+        client: MaxClient,
+        channel_id: int
 ):
     """Resolve channel by id"""
 
@@ -31,8 +31,8 @@ async def resolve_channel_id(
 
 
 async def join_channel(
-    client: MaxClient,
-    username: str
+        client: MaxClient,
+        username: str
 ):
     """Joining a channel and resolving"""
 
@@ -47,7 +47,7 @@ async def join_channel(
 async def create_channel(
         client: MaxClient,
         channel_name: str
-    ):
+):
     return await client.invoke_method(
         opcode=64,
         payload={
@@ -72,7 +72,7 @@ async def mute_channel(
         client: MaxClient,
         channel_id: int,
         mute: bool = True
-    ):
+):
     """Mutes or unmutes a channel"""
 
     return await client.invoke_method(
