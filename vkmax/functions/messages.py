@@ -11,6 +11,7 @@ async def send_message(
         client: MaxClient,
         chat_id: int,
         text: str,
+        elements: list,
         notify: bool = True
 ):
     """Sends message to specified chat"""
@@ -22,7 +23,7 @@ async def send_message(
             "message": {
                 "text": text,
                 "cid": randint(1750000000000, 2000000000000),
-                "elements": [],
+                "elements": elements,
                 "attaches": []
             },
             "notify": notify
@@ -64,6 +65,7 @@ async def edit_message(
         client: MaxClient,
         chat_id: int,
         message_id: int,
+        elements: list,
         text: str
 ):
     """Edits the specified message"""
@@ -74,7 +76,7 @@ async def edit_message(
             "chatId": chat_id,
             "messageId": str(message_id),
             "text": text,
-            "elements": [],
+            "elements": elements,
             "attachments": []
         }
     )
@@ -121,6 +123,7 @@ async def reply_message_file(
         chat_id: int,
         reply_to_message_id: int,
         file_path: str,
+        elements: list,
         caption: str = "",
         notify=True,
         max_attempts: int = 5,
@@ -176,7 +179,7 @@ async def reply_message_file(
                 "message": {
                     "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
-                    "elements": [],
+                    "elements": elements,
                     "link": {
                         "type": "REPLY",
                         "messageId": str(reply_to_message_id)
@@ -199,7 +202,8 @@ async def reply_message_file(
     return response
 
 
-async def reply_message(client: MaxClient, chat_id: int, reply_to_message_id: int, text: str, notify=True):
+async def reply_message(client: MaxClient, chat_id: int, reply_to_message_id: int, text: str, elements: list,
+                        notify=True):
     """Replies to message in the chat"""
     return await client.invoke_method(
         opcode=64,
@@ -208,7 +212,7 @@ async def reply_message(client: MaxClient, chat_id: int, reply_to_message_id: in
             "message": {
                 "text": text,
                 "cid": randint(1750000000000, 2000000000000),
-                "elements": [],
+                "elements": elements,
                 "link": {
                     "type": "REPLY",
                     "messageId": str(reply_to_message_id)
@@ -220,8 +224,8 @@ async def reply_message(client: MaxClient, chat_id: int, reply_to_message_id: in
     )
 
 
-async def send_photo(client: MaxClient, chat_id: int, image_url: str, caption: str = "", notify: bool = True,
-                     max_attempts: int = 5, wait_seconds: float = 2.0):
+async def send_photo(client: MaxClient, chat_id: int, image_url: str, elements: list, caption: str = "",
+                     notify: bool = True, max_attempts: int = 5, wait_seconds: float = 2.0):
     """ Sends photo to specified chat (async, with prepare_file) """
     if not image_url:
         return
@@ -249,7 +253,7 @@ async def send_photo(client: MaxClient, chat_id: int, image_url: str, caption: s
                 "message": {
                     "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
-                    "elements": [],
+                    "elements": elements,
                     "attaches": [attachment]
                 },
                 "notify": notify
@@ -268,7 +272,7 @@ async def send_photo(client: MaxClient, chat_id: int, image_url: str, caption: s
     return response
 
 
-async def send_file(client: MaxClient, chat_id: int, file_url: str, caption: str = "",
+async def send_file(client: MaxClient, chat_id: int, file_url: str, elements: list, caption: str = "",
                     notify: bool = True, max_attempts: int = 5, wait_seconds: float = 2.0):
     """ Sends a file from a URL to the chat with waiting for file processing """
     if not file_url:
@@ -298,7 +302,7 @@ async def send_file(client: MaxClient, chat_id: int, file_url: str, caption: str
                 "message": {
                     "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
-                    "elements": [],
+                    "elements": elements,
                     "attaches": [attachment]
                 },
                 "notify": notify
@@ -317,7 +321,8 @@ async def send_file(client: MaxClient, chat_id: int, file_url: str, caption: str
     return response
 
 
-async def send_video(client: MaxClient, chat_id: int, file_url: str, caption: str = "", notify: bool = True,
+async def send_video(client: MaxClient, chat_id: int, file_url: str, elements: list, caption: str = "",
+                     notify: bool = True,
                      max_attempts: int = 5, wait_seconds: float = 2.0):
     """ Sends a video from a URL to the chat with waiting for file processing """
     if not file_url:
@@ -347,7 +352,7 @@ async def send_video(client: MaxClient, chat_id: int, file_url: str, caption: st
                 "message": {
                     "text": caption,
                     "cid": randint(1750000000000, 2000000000000),
-                    "elements": [],
+                    "elements": elements,
                     "attaches": [attachment]
                 },
                 "notify": notify
@@ -366,14 +371,15 @@ async def send_video(client: MaxClient, chat_id: int, file_url: str, caption: st
     return response
 
 
-async def forward_message(client: MaxClient, chat_id: int, old_chat_id: int, message_id: int, notify=True):
+async def forward_message(client: MaxClient, chat_id: int, old_chat_id: int, elements: list, message_id: int,
+                          notify=True):
     return await client.invoke_method(
         opcode=64,
         payload={
             "chatId": chat_id,
             "message": {
                 "cid": randint(1750000000000, 2000000000000),
-                "elements": [],
+                "elements": elements,
                 "link": {
                     "type": "FORWARD",
                     "messageId": str(message_id),
@@ -443,4 +449,3 @@ async def file_uploader(upload_url, api_token, file_name, content, mime_type):
     except Exception as e:
         print(f"File upload failed: {e}")
         return False, {}
-
