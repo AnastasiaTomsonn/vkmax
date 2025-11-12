@@ -29,17 +29,17 @@ def ensure_connected(method: Callable):
     return wrapper
 
 
-# def handle_errors(method: Callable):
-#     @wraps(method)
-#     async def wrapper(self, *args, **kwargs):
-#         try:
-#             result = await method(self, *args, **kwargs)
-#             return {"status": True, "result": result}
-#         except Exception as e:
-#             _logger.error(f"{method.__name__} ERROR: {e}")
-#             return {"status": False, "message": e}
-#
-#     return wrapper
+def handle_errors(method: Callable):
+    @wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            result = await method(self, *args, **kwargs)
+            return {"status": True, "result": result}
+        except Exception as e:
+            _logger.error(f"{method.__name__} ERROR: {e}")
+            return {"status": False, "message": e}
+
+    return wrapper
 
 
 class MaxClient:
@@ -58,7 +58,7 @@ class MaxClient:
         self._cached_contacts = None
 
     # --- WebSocket connection management ---
-    # @handle_errors
+    @handle_errors
     async def connect(self):
         if self._connection:
             return self._connection
@@ -200,7 +200,7 @@ class MaxClient:
             }
         )
 
-    # @handle_errors
+    @handle_errors
     @ensure_connected
     async def send_code(self, phone: str) -> str:
         """:returns: Login token."""
@@ -219,7 +219,7 @@ class MaxClient:
 
         return start_auth_response["payload"]["token"]
 
-    # @handle_errors
+    @handle_errors
     @ensure_connected
     async def sign_in(self, sms_token: str, sms_code: int):
         """
@@ -253,7 +253,7 @@ class MaxClient:
 
         return verification_response
 
-    # @handle_errors
+    @handle_errors
     @ensure_connected
     async def sing_in_password(self, track_id: str, password: str):
         verification_response = await self.invoke_method(
@@ -278,7 +278,7 @@ class MaxClient:
 
         return verification_response
 
-    # @handle_errors
+    @handle_errors
     @ensure_connected
     async def login_by_token(self, token: str):
         await self._send_hello_packet()
@@ -325,7 +325,7 @@ class MaxClient:
 
         return login_response
 
-    # @handle_errors
+    @handle_errors
     @ensure_connected
     async def logout(self):
         if not self._connection:
