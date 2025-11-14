@@ -14,16 +14,10 @@ from functools import wraps
 WS_HOST = "wss://ws-api.oneme.ru/websocket"
 RPC_VERSION = 11
 APP_VERSION = "25.9.15"
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/137.0.0.0 Safari/537.36"
-)
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
 _logger = logging.getLogger(__name__)
 
-
-# --- Decorators ------------------------------------------------------
 
 def ensure_connected(method: Callable):
     @wraps(method)
@@ -48,203 +42,49 @@ def handle_errors(method: Callable):
     return wrapper
 
 
-# --- Client ----------------------------------------------------------
-
 class MaxClient:
     def __init__(self):
-        # Connection and session state
         self._connection: Optional[ClientConnection] = None
         self._http_pool: Optional[aiohttp.ClientSession] = None
-
-        # Auth & state
         self._is_logged_in: bool = False
         self._seq = itertools.count(1)
-
-        # Tasks
         self._keepalive_task: Optional[asyncio.Task] = None
         self._recv_task: Optional[asyncio.Task] = None
-
-        # Callbacks
         self._incoming_event_callback = None
-
-        # Pending RPC calls
-        self._pending: dict[int, asyncio.Future] = {}
-        self._video_pending: dict[str, asyncio.Future] = {}
-        self._file_pending: dict[str, asyncio.Future] = {}
-
-        # Cached data
+        self._pending = {}
+        self._video_pending = {}
+        self._file_pending = {}
         self._cached_chats = None
-        self._cached_favourite_chats = None
         self._cached_contacts = None
+        self._cached_favourite_chats = None
 
-        # Control for start() loop
-        self._running = False
-        self._reconnect_delay = 3.0
-
-    # =================================================================
-    # New / public helpers
-    # =================================================================
-
-    async def start(self):
-        """
-        Запускает вечный цикл подключения с авто-переподключением.
-        Внешний код должен вызывать именно этот метод.
-        """
-        if self._running:
-            _logger.info("MaxClient.start: already running")
-            return
-
-        self._running = True
-        _logger.info("MaxClient: start loop initiated")
-
-        while self._running:
-            try:
-                # connect() возвращает структуру в обёртке handle_errors,
-                # но внутри он создаёт self._connection и _recv_task
-                await self.connect()
-                _logger.info("MaxClient: connection established, waiting for recv task to finish")
-                # ждём пока recv-loop завершится (внезапный разрыв/закрытие)
-                if self._recv_task:
-                    try:
-                        await self._recv_task
-                    except asyncio.CancelledError:
-                        _logger.info("MaxClient: recv task cancelled while awaiting")
-                else:
-                    # на случай, если connect не создал recv_task (маловероятно)
-                    await asyncio.sleep(self._reconnect_delay)
-
-            except Exception as e:
-                _logger.exception(f"MaxClient.start: unexpected error: {e}")
-
-            # Очистка состояния перед переподключением
-            try:
-                # остановим keepalive если он ещё висит
-                await self._stop_keepalive_task()
-            except Exception:
-                pass
-
-            # Помним: не чистим cached_* и auth состояние — это делает logout()
-            # Очистим временные структуры, которые могли быть привязаны к соединению
-            self._connection = None
-            # не удаляем _pending полностью — это может привести к залипшим future;
-            # но если соединение оборвано, лучше отменить все ожидания
-            for fut in list(self._pending.values()):
-                if not fut.done():
-                    fut.set_exception(RuntimeError("Connection lost"))
-            self._pending.clear()
-
-            _logger.info(f"MaxClient: reconnecting in {self._reconnect_delay} seconds...")
-            await asyncio.sleep(self._reconnect_delay)
-
-        _logger.info("MaxClient: start loop finished (stopped)")
-
-    async def stop(self):
-        """Останавливает start loop и корректно закрывает соединение."""
-        self._running = False
-        if self._recv_task:
-            self._recv_task.cancel()
-        await self.disconnect()
-
-    async def send_raw(self, payload: dict):
-        """
-        Низкоуровневая отправка произвольного JSON в сокет.
-        Используй для нестандартных операций (не RPC).
-        """
-        if not self._connection:
-            raise RuntimeError("WebSocket not connected. Call .connect() first.")
-        await self._connection.send(json.dumps(payload))
-
-    def set_attribute(self, handler: Callable):
-        """
-        Альтернативное имя для установки обработчика входящих событий.
-        Поддерживает как async def handler(...), так и sync def handler(...).
-        Внешний проект использует set_attribute — делаем совместимость.
-        """
-        # Если передали coroutine function — сохраняем напрямую
-        if asyncio.iscoroutinefunction(handler):
-            self._incoming_event_callback = handler
-            return
-
-        # Если передан sync function — завернём в coroutine
-        def _wrap_sync(*args, **kwargs):
-            return handler(*args, **kwargs)
-
-        async def _async_wrapper(*args, **kwargs):
-            return _wrap_sync(*args, **kwargs)
-
-        self._incoming_event_callback = _async_wrapper
-
-    # Сохраняем существующий API (чтобы ничего не ломать)
-    async def set_callback(self, function):
-        if not asyncio.iscoroutinefunction(function):
-            raise TypeError('callback must be async')
-        self._incoming_event_callback = function
-
-    # =================================================================
-    # WebSocket Connection
-    # =================================================================
+    # --- WebSocket connection management ---
     @handle_errors
     async def connect(self):
-        """
-        Устанавливает WebSocket-соединение (один раз).
-        Возвращает результат в виде dict от handle_errors.
-        """
         if self._connection:
-            _logger.debug("connect(): already connected")
             return self._connection
 
         _logger.info(f'Connecting to {WS_HOST}...')
-        # используем websockets.connect как раньше — совместимость сохранена
         self._connection = await websockets.connect(
             WS_HOST,
             origin=websockets.Origin('https://web.max.ru'),
             user_agent_header=USER_AGENT
         )
 
-        if self._is_logged_in:
-            await self._start_keepalive_task()
-
-        # стартуем recv loop
         self._recv_task = asyncio.create_task(self._recv_loop())
         _logger.info('Connected. Receive task started.')
         return self._connection
 
     @ensure_connected
     async def disconnect(self):
-        """Корректно закрывает соединение и http пул."""
-        try:
-            await self._stop_keepalive_task()
-        except Exception:
-            _logger.exception("Error while stopping keepalive")
-
-        if self._recv_task:
-            # аккуратно остановим recv_task
-            self._recv_task.cancel()
-            try:
-                await self._recv_task
-            except asyncio.CancelledError:
-                _logger.debug("recv_task cancelled on disconnect")
-
-        try:
-            await self._connection.close()
-        except Exception:
-            _logger.exception("Error closing websocket connection")
-
-        self._connection = None
-
+        await self._stop_keepalive_task()
+        self._recv_task.cancel()
+        await self._connection.close()
         if self._http_pool:
-            try:
-                await self._http_pool.close()
-            except Exception:
-                _logger.exception("Error closing http pool")
-            self._http_pool = None
+            await self._http_pool.close()
 
     @ensure_connected
     async def invoke_method(self, opcode: int, payload: dict[str, Any]):
-        """
-        RPC-вызов: отправляет запрос и ждёт ответа, использует seq.
-        Возвращает распарсенный ответ.
-        """
         seq = next(self._seq)
 
         request = {
@@ -259,83 +99,51 @@ class MaxClient:
         future = asyncio.get_event_loop().create_future()
         self._pending[seq] = future
 
-        # отправляем JSON
-        await self._connection.send(json.dumps(request))
+        await self._connection.send(
+            json.dumps(request)
+        )
 
-        # ждём ответа (future будет установлен в _handle_packet)
         response = await future
         _logger.info(f'<- RESPONSE: {response}')
 
         return response
 
-    # =================================================================
-    # Receiving messages
-    # =================================================================
+    async def set_callback(self, function):
+        if not asyncio.iscoroutinefunction(function):
+            raise TypeError('callback must be async')
+        self._incoming_event_callback = function
+
     async def _recv_loop(self):
         try:
-            async for packet_raw in self._connection:
-                try:
-                    packet = json.loads(packet_raw)
-                except Exception:
-                    _logger.warning(f"Malformed packet: {packet_raw}")
-                    continue
-                await self._handle_packet(packet)
+            async for packet in self._connection:
+                packet = json.loads(packet)
 
-        except websockets.ConnectionClosedError as e:
-            _logger.warning(f"_recv_loop: connection closed unexpectedly: {e}")
+                seq = packet["seq"]
+                future = self._pending.pop(seq, None)
+                if future:
+                    future.set_result(packet)
+                    continue
+
+                if packet.get("opcode") == 136:
+                    payload = packet.get("payload", {})
+                    future = None
+
+                    if "videoId" in payload:
+                        future = self._video_pending.pop(payload["videoId"], None)
+                    elif "fileId" in payload:
+                        future = self._file_pending.pop(payload["fileId"], None)
+
+                    if future:
+                        future.set_result(None)
+
+                if self._incoming_event_callback:
+                    asyncio.create_task(self._incoming_event_callback(self, packet))
 
         except asyncio.CancelledError:
-            _logger.info('recv_loop cancelled')
+            _logger.info(f'receiver cancelled')
             return
 
-        except Exception as e:
-            _logger.exception(f"_recv_loop error: {e}")
-
-        finally:
-            _logger.warning("recv loop ended (connection dropped)")
-
-    async def _handle_packet(self, packet: dict):
-        """
-        Вынесенная логика обработки одного пакета:
-         - ответ на invoke_method (по seq)
-         - обработка attachment (opcode==136)
-         - вызов внешнего callback для событий
-        """
-        seq = packet.get("seq")
-        if seq is not None:
-            future = self._pending.pop(seq, None)
-            if future:
-                # устанавливаем результат для ожидающего invoke_method
-                if not future.done():
-                    future.set_result(packet)
-                return
-
-        # special-case: attachment/video/file progress (opcode 136 как прежде)
-        if packet.get("opcode") == 136:
-            payload = packet.get("payload", {}) or {}
-            future = None
-
-            vid = payload.get("videoId")
-            fid = payload.get("fileId")
-
-            if vid:
-                future = self._video_pending.pop(vid, None)
-            elif fid:
-                future = self._file_pending.pop(fid, None)
-
-            if future and not future.done():
-                future.set_result(None)
-                return
-
-        # incoming event - делегируем внешнему обработчику (если есть)
-        if self._incoming_event_callback:
-            try:
-                # запускаем в фоне, чтобы не блокировать recv loop
-                asyncio.create_task(self._incoming_event_callback(self, packet))
-            except Exception:
-                _logger.exception("Error scheduling incoming event callback")
-
-    # --- Keepalive system ------------------------------------------------
+    # --- Keepalive system
 
     @ensure_connected
     async def _send_keepalive_packet(self):
@@ -346,7 +154,7 @@ class MaxClient:
 
     @ensure_connected
     async def _keepalive_loop(self):
-        _logger.info('keepalive task started')
+        _logger.info(f'keepalive task started')
         try:
             while True:
                 await self._send_keepalive_packet()
@@ -368,14 +176,10 @@ class MaxClient:
             return
 
         self._keepalive_task.cancel()
-        try:
-            await self._keepalive_task
-        except asyncio.CancelledError:
-            pass
         self._keepalive_task = None
         return
 
-    # --- Authentication --------------------------------------------------
+    # --- Authentication ---
 
     @ensure_connected
     async def _send_hello_packet(self):
@@ -440,7 +244,7 @@ class MaxClient:
 
         try:
             phone = verification_response["payload"]["profile"]["phone"]
-        except Exception:
+        except:
             phone = '[?]'
             _logger.warning('Got no phone number in server response')
         _logger.info(f'Successfully logged in as {phone}')
@@ -466,7 +270,7 @@ class MaxClient:
 
         try:
             phone = verification_response["payload"]["profile"]["phone"]
-        except Exception:
+        except:
             phone = '[?]'
             _logger.warning('Got no phone number in server response')
         _logger.info(f'Successfully logged in as {phone}')
@@ -498,21 +302,23 @@ class MaxClient:
 
         try:
             phone = login_response["payload"]["profile"]["phone"]
-        except Exception:
+        except:
             phone = '[?]'
             _logger.warning('Got no phone number in server response')
         _logger.info(f'Successfully logged in as {phone}')
 
+        # Cache chats from login response
         if "chats" in login_response["payload"]:
             self._cached_chats = login_response["payload"]["chats"]
             _logger.info(
                 f"Cached {len(login_response['payload']['chats'])} chats from login"
             )
 
+        # Cache chats from login response
         if "contacts" in login_response["payload"]:
             self._cached_contacts = login_response["payload"]["contacts"]
             _logger.info(
-                f"Cached {len(login_response['payload']['contacts'])} contacts from login"
+                f"Cached {len(login_response['payload']['contacts'])} chats from login"
             )
 
         if "config" in login_response["payload"]:
@@ -553,8 +359,8 @@ class MaxClient:
             self._is_logged_in = False
             self._cached_chats = None
             self._pending.clear()
-            self._video_pending.clear()
             self._file_pending.clear()
+            self._video_pending.clear()
 
             _logger.info("Logout successful, connection closed and state cleared.")
 
@@ -562,15 +368,11 @@ class MaxClient:
             _logger.error(f"LOGOUT_ERROR: {e}")
             raise
 
-    # =================================================================
-    # Cached data access
-    # =================================================================
-
     def get_cached_chats(self):
         return self._cached_chats
 
     def get_cached_contacts(self):
         return self._cached_contacts
 
-    def get_favourite_chats(self):
+    def get_cached_favourite_chats(self):
         return self._cached_favourite_chats
