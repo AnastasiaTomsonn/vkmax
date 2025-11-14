@@ -29,7 +29,7 @@ def get_favourite_chats(
         presence_sync: int = 0,
         drafts_sync: int = 0,
 ):
-    cached_response = client.get_favourite_chats()
+    cached_response = client.get_cached_favourite_chats()
 
     if cached_response is None:
         raise Exception(
