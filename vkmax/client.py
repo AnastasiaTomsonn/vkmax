@@ -272,10 +272,6 @@ class MaxClient:
     # Receiving messages
     # =================================================================
     async def _recv_loop(self):
-        """
-        Цикл приёма: читает сообщения и делегирует обработку.
-        При разрыве/исключении метод завершится, и start() переподключит.
-        """
         try:
             async for packet_raw in self._connection:
                 try:
@@ -283,11 +279,13 @@ class MaxClient:
                 except Exception:
                     _logger.warning(f"Malformed packet: {packet_raw}")
                     continue
-
                 await self._handle_packet(packet)
 
+        except websockets.ConnectionClosedError as e:
+            _logger.warning(f"_recv_loop: connection closed unexpectedly: {e}")
+
         except asyncio.CancelledError:
-            _logger.info('receiver cancelled')
+            _logger.info('recv_loop cancelled')
             return
 
         except Exception as e:
