@@ -21,6 +21,25 @@ def get_chats(
     return cached_response
 
 
+def get_favourite_chats(
+        client: MaxClient,
+        count: int = 40,
+        chats_sync: int = 0,
+        contacts_sync: int = 0,
+        presence_sync: int = 0,
+        drafts_sync: int = 0,
+):
+    cached_response = client.get_favourite_chats()
+
+    if cached_response is None:
+        raise Exception(
+            "No favourite chats cached. Please call login_by_token() or sign_in() first. "
+            "Chats are automatically loaded during login."
+        )
+
+    return cached_response
+
+
 async def get_chat(
         client: MaxClient,
         chat_id: int,
