@@ -131,14 +131,20 @@ async def mark_chat_as_unread(
     )
 
 
-async def mute_chat(client: MaxClient, chat_id: int, forever: bool = True):
-    dont_disturb = -1 if forever else 0
-
+async def mute_chat(client: MaxClient, chat_id: int, dont_disturb_until: int):
     return await client.invoke_method(
         opcode=22,
         payload={
-            "settings": {"chats": {str(chat_id): {"dontDisturbUntil": dont_disturb}}}
+            "settings": {"chats": {str(chat_id): {"dontDisturbUntil": dont_disturb_until}}}
         },
+    )
+
+
+async def delete_chat(client: MaxClient, chat_id: int):
+    import time
+    return await client.invoke_method(
+        opcode=52,
+        payload={"chatId": chat_id, "lastEventTime": int(time.time() * 1000), "forAll": False},
     )
 
 
