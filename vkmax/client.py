@@ -60,6 +60,10 @@ class MaxClient:
         self._recv_task: Optional[asyncio.Task] = None
         self._incoming_event_callback = None
         self._pending: dict[int, asyncio.Future] = {}
+
+        self._device_id = str(uuid.uuid4())
+        self._session_token: Optional[str] = None
+
         self._video_pending = {}
         self._file_pending = {}
         self._cached_chats = None
@@ -99,6 +103,53 @@ class MaxClient:
         return self._connection
 
     async def _reconnect(self):
+        if self._closing:
+            return
+
+        async with self._reconnect_lock:
+            _logger.warning("Reconnecting WebSocket...")
+
+            # cancel tasks...
+            if self._recv_task:
+                self._recv_task.cancel()
+                self._recv_task = None
+
+            if self._keepalive_task:
+                self._keepalive_task.cancel()
+                self._keepalive_task = None
+
+            # close old connection
+            if self._connection:
+                try:
+                    await self._connection.close()
+                except:
+                    pass
+                self._connection = None
+
+            await asyncio.sleep(2)
+
+            # reconnect socket
+            await self.connect()
+
+            # IMPORTANT: re-hello
+            try:
+                await self._send_hello_packet()
+            except Exception as e:
+                _logger.error(f"Reconnect hello failed: {e}")
+
+            # IMPORTANT: re-login
+            if self._is_logged_in and hasattr(self, "_session_token"):
+                try:
+                    await self.login_by_token(self._session_token)
+                except Exception as e:
+                    _logger.error(f"Reconnect login failed: {e}")
+
+            # restart keepalive
+            await self._start_keepalive_task()
+
+            _logger.info("Reconnected successfully.")
+
+    async def _reconnect_1(self):
         if getattr(self, "_closing", False):
             _logger.info("Client is closing — skipping reconnect.")
             return
@@ -155,7 +206,7 @@ class MaxClient:
             # Закрываем старый сокет
             if self._connection:
                 try:
-                    await self._connection.close()
+                    await self._connection.close(reason="reconnect")
                 except Exception:
                     pass
                 self._connection = None
@@ -232,16 +283,26 @@ class MaxClient:
         future = loop.create_future()
         self._pending[seq] = future
 
-        # Попробуем отправить, если send упадёт — сделаем reconnect
         try:
             await self._connection.send(json.dumps(request))
         except Exception as e:
             _logger.error(f"Send error: {e}")
-            if seq in self._pending:
-                fut = self._pending.pop(seq, None)
-                if fut and not fut.done():
-                    fut.set_exception(RuntimeError("Send failed - connection error"))
-            # Попытаемся переподключиться
+
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+            self._connection = None
+            fut = self._pending.pop(seq, None)
+            if fut and not fut.done():
+                fut.set_exception(RuntimeError("Send failed - connection lost"))
+
+            for d in (self._file_pending, self._video_pending):
+                for _, f in list(d.items()):
+                    if not f.done():
+                        f.set_exception(RuntimeError("Connection lost during send"))
+                d.clear()
+
             await self._reconnect()
             raise
 
@@ -376,7 +437,7 @@ class MaxClient:
                     "screen": "956x1470 2.0x",
                     "timezone": "Asia/Vladivostok"
                 },
-                "deviceId": str(uuid.uuid4())
+                "deviceId": self._device_id
             }
         )
 
@@ -457,6 +518,8 @@ class MaxClient:
     @handle_errors
     @ensure_connected
     async def login_by_token(self, token: str):
+        if token and self._session_token != token:
+            self._session_token = token
         await self._send_hello_packet()
         _logger.info("using session")
         login_response = await self.invoke_method(
