@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 import aiohttp
 import websockets
+from websockets import ConnectionClosedOK, ConnectionClosedError, ConnectionClosed
 from websockets.asyncio.client import ClientConnection
 
 from functools import wraps
@@ -118,13 +119,22 @@ class MaxClient:
                 self._keepalive_task.cancel()
                 self._keepalive_task = None
 
+            from websockets.exceptions import ConnectionClosedError
+
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(Exception("Connection lost"))
+            self._pending.clear()
+
             # close old connection
-            if self._connection:
+            conn = self._connection
+            self._connection = None
+
+            if conn:
                 try:
-                    await self._connection.close()
-                except:
+                    asyncio.create_task(conn.close(reason="reconnect"))
+                except Exception:
                     pass
-                self._connection = None
 
             await asyncio.sleep(2)
 
@@ -362,13 +372,17 @@ class MaxClient:
         except asyncio.CancelledError:
             _logger.info("Receiver cancelled")
             return
-        except Exception as e:
-            _logger.error(f"Receive loop error: {type(e).__name__}: {e}")
-            # если соединение разорвано — попытаемся переподключиться
-            try:
-                await self._reconnect()
-            except Exception as e2:
-                _logger.error(f"Reconnect from recv loop failed: {e2}")
+        except ConnectionClosedOK:
+            _logger.info("WebSocket closed gracefully")
+            return
+        except ConnectionClosedError as e:
+            _logger.warning(f"Connection lost ({e}) — reconnecting...")
+            await self._reconnect()
+            return
+        except ConnectionClosed as e:
+            _logger.warning(f"WebSocket closed — reconnecting... ({e})")
+            await self._reconnect()
+            return
 
     # --- Keepalive system
     @ensure_connected
