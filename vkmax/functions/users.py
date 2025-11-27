@@ -45,6 +45,17 @@ async def add_to_contacts(client: MaxClient, user_id: int):
     )
 
 
+async def add_to_contacts_by_name(client: MaxClient, phone: str, first_name: str = None, last_name: str = None):
+    """Adding user to contacts via userid"""
+    payload = {"phone": phone, "first_name": first_name or phone}
+    if last_name:
+        payload["last_name"] = last_name
+    return await client.invoke_method(
+        opcode=41,
+        payload=payload
+    )
+
+
 async def ban(client: MaxClient, user_id: int):
     """Banhammer to user's head"""
 
