@@ -119,8 +119,6 @@ class MaxClient:
                 self._keepalive_task.cancel()
                 self._keepalive_task = None
 
-            from websockets.exceptions import ConnectionClosedError
-
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(Exception("Connection lost"))
