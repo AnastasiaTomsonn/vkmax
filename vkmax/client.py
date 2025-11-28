@@ -547,6 +547,7 @@ class MaxClient:
             }
         )
 
+
         if "error" in login_response["payload"]:
             raise Exception(login_response["payload"])
 
