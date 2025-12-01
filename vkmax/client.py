@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 
 import aiohttp
 import websockets
-from websockets import ConnectionClosedOK, ConnectionClosedError, ConnectionClosed
+from websockets import ConnectionClosedOK, ConnectionClosedError, ConnectionClosed, Close
 from websockets.asyncio.client import ClientConnection
 
 from functools import wraps
@@ -25,14 +25,15 @@ def ensure_connected(method: Callable):
     async def wrapper(self, *args, **kwargs):
         if getattr(self, "_closing", False):
             raise RuntimeError("Client is closing.")
-
         if self._connection is None:
             _logger.warning("Connection is None — reconnecting...")
-            await self._reconnect()
+            self._trigger_reconnect()
+            await asyncio.sleep(0.1)
 
         elif self._connection.state.name in ("CLOSING", "CLOSED"):
-            _logger.warning("Connection closed — reconnecting...")
-            await self._reconnect()
+            _logger.warning("Connection lost — triggering reconnect...")
+            self._trigger_reconnect()
+            await asyncio.sleep(0.1)
         return await method(self, *args, **kwargs)
 
     return wrapper
@@ -74,7 +75,9 @@ class MaxClient:
         # Locks to prevent concurrent connects/reconnects
         self._connect_lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
-        self._closing = False  # флаг для безопасного отключения
+
+        self._is_reconnecting = False
+        self._closing = False
 
     # --- WebSocket connection management ---
     @handle_errors
@@ -99,148 +102,51 @@ class MaxClient:
                 pass
             self._recv_task = None
 
+        await self._start_keepalive_task()
         self._recv_task = asyncio.create_task(self._recv_loop())
         _logger.info('Connected. Receive task started.')
         return self._connection
 
     async def _reconnect(self):
+        if self._is_reconnecting:
+            return
+
         if self._closing:
             return
 
-        async with self._reconnect_lock:
-            _logger.warning("Reconnecting WebSocket...")
+        self._is_reconnecting = True
+        _logger.warning("Reconnecting WebSocket...")
 
-            # cancel tasks...
-            if self._recv_task:
-                self._recv_task.cancel()
-                self._recv_task = None
+        # Устанавливаем начальный backoff
+        backoff = getattr(self, "_backoff", 3)
 
-            if self._keepalive_task:
-                self._keepalive_task.cancel()
-                self._keepalive_task = None
-
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(Exception("Connection lost"))
-            self._pending.clear()
-
-            # close old connection
-            conn = self._connection
-            self._connection = None
-
-            if conn:
-                try:
-                    asyncio.create_task(conn.close(reason="reconnect"))
-                except Exception:
-                    pass
-
-            await asyncio.sleep(2)
-
-            # reconnect socket
-            await self.connect()
-
-            # IMPORTANT: re-hello
+        while not self._closing:
             try:
-                await self._send_hello_packet()
+                # Безопасно останавливаем таски и закрываем соединение
+                await self.disconnect()
             except Exception as e:
-                _logger.error(f"Reconnect hello failed: {e}")
+                _logger.error(f"Reconnect: disconnect failed: {e}")
 
-            # IMPORTANT: re-login
-            if self._is_logged_in and hasattr(self, "_session_token"):
-                try:
-                    await self.login_by_token(self._session_token)
-                except Exception as e:
-                    _logger.error(f"Reconnect login failed: {e}")
+            _logger.info(f"Sleeping before reconnect: {backoff}s")
+            await asyncio.sleep(backoff)
 
-            # restart keepalive
-            await self._start_keepalive_task()
-
-            _logger.info("Reconnected successfully.")
-
-    async def _reconnect_1(self):
-        if getattr(self, "_closing", False):
-            _logger.info("Client is closing — skipping reconnect.")
-            return
-
-        async with self._reconnect_lock:
-            # Если в момент ожидания уже есть живое соединение — ничего не делаем
-            if self._connection is not None:
-                # Проверяем состояние WebSocket
-                state = getattr(self._connection, "state", None)
-                if state and state.name in ("OPEN", "CONNECTING"):
-                    _logger.info(f"Already connected (state={state.name}) — skipping reconnect.")
-                    return
-
-            _logger.warning("Reconnecting WebSocket...")
-
-            # Отменяем таски
-            if self._recv_task:
-                try:
-                    self._recv_task.cancel()
-                except Exception:
-                    pass
-                self._recv_task = None
-
-            if self._keepalive_task:
-                try:
-                    self._keepalive_task.cancel()
-                except Exception:
-                    pass
-                self._keepalive_task = None
-
-            # Сохраняем и затем сняем ожидания (если есть) — чтобы ожидающие корутины не висли вечно
-            if self._pending:
-                for seq, fut in list(self._pending.items()):
-                    if not fut.done():
-                        try:
-                            fut.set_exception(RuntimeError("Connection lost during request (reconnect)."))
-                        except Exception:
-                            pass
-                self._pending.clear()
-
-            # Аналогично для файлов / видео
-            try:
-                for d in (self._file_pending, self._video_pending):
-                    for k, fut in list(d.items()):
-                        if not fut.done():
-                            try:
-                                fut.set_exception(RuntimeError("Connection lost during request (reconnect)."))
-                            except Exception:
-                                pass
-                    d.clear()
-            except Exception:
-                pass
-
-            # Закрываем старый сокет
-            if self._connection:
-                try:
-                    await self._connection.close(reason="reconnect")
-                except Exception:
-                    pass
-                self._connection = None
-
-            # Небольшая пауза — даём серверу время закрыть сессию
-            await asyncio.sleep(2)
-
-            # Попытка переподключиться (connect сам сериализован)
             try:
                 await self.connect()
+                _logger.info("Reconnect: connected")
             except Exception as e:
-                _logger.error(f"Reconnect: failed to connect: {e}")
-                # Exponential backoff минимально
-                await asyncio.sleep(2)
-                raise
+                _logger.error(f"Reconnect: connect failed: {e}")
+                backoff = min(backoff + 2, 30)
+                continue
 
-            # Перезапускаем keepalive, если пользователь залогинен
-            try:
-                if self._is_logged_in:
-                    await self._start_keepalive_task()
-            except Exception as e:
-                _logger.error(f"Reconnect: failed to start keepalive: {e}")
+            _logger.warning("Reconnected successfully.")
+            break
 
-            _logger.info("Reconnected successfully.")
+        self._is_reconnecting = False
 
-    @ensure_connected
+    def _trigger_reconnect(self):
+        if not self._is_reconnecting:
+            asyncio.create_task(self._reconnect())
+
     async def disconnect(self):
         self._closing = True
         # Остановим keepalive
@@ -271,7 +177,6 @@ class MaxClient:
             except Exception:
                 pass
             self._http_pool = None
-
         self._closing = False
 
     @ensure_connected
@@ -296,11 +201,15 @@ class MaxClient:
         except Exception as e:
             _logger.error(f"Send error: {e}")
 
-            try:
-                await self._connection.close()
-            except Exception:
-                pass
+            # корректно закрываем старое соединение
+            if self._connection:
+                try:
+                    await self._connection.close()
+                except Exception:
+                    pass
             self._connection = None
+
+            # очищаем pending
             fut = self._pending.pop(seq, None)
             if fut and not fut.done():
                 fut.set_exception(RuntimeError("Send failed - connection lost"))
@@ -311,8 +220,8 @@ class MaxClient:
                         f.set_exception(RuntimeError("Connection lost during send"))
                 d.clear()
 
-            await self._reconnect()
-            raise
+            self._trigger_reconnect()
+            raise RuntimeError("Send failed - connection lost, reconnect triggered")
 
         # Ожидаем ответа с таймаутом
         try:
@@ -374,45 +283,33 @@ class MaxClient:
             _logger.info("WebSocket closed gracefully")
             return
         except ConnectionClosedError as e:
-            _logger.warning(f"Connection lost ({e}) — reconnecting...")
-            await self._reconnect()
+            _logger.warning(f"ConnectionClosedError ({e}) — reconnecting...")
+            self._trigger_reconnect()
             return
-        except ConnectionClosed as e:
-            _logger.warning(f"WebSocket closed — reconnecting... ({e})")
-            await self._reconnect()
+        except Exception as e:
+            _logger.warning(f"ConnectionClosed ({e}) — reconnecting...")
+            self._trigger_reconnect()
             return
 
     # --- Keepalive system
     @ensure_connected
     async def _send_keepalive_packet(self):
-        try:
-            await self.invoke_method(
-                opcode=1,
-                payload={"interactive": False}
-            )
-        except Exception as e:
-            _logger.error(f'Keepalive failed: {e}')
-            try:
-                await self._reconnect()
-            except Exception as e2:
-                _logger.error(f"Keepalive reconnect attempt failed: {e2}")
+        await self.invoke_method(
+            opcode=1,
+            payload={"interactive": False}
+        )
 
     @ensure_connected
     async def _keepalive_loop(self):
         _logger.info(f'keepalive task started')
-        try:
-            while True:
+        while True:
+            try:
                 await self._send_keepalive_packet()
                 await asyncio.sleep(12)
-        except asyncio.CancelledError:
-            _logger.info('keepalive task stopped')
-            return
-        except Exception as e:
-            _logger.error(f"Keepalive loop error: {e}")
-            try:
-                await self._reconnect()
-            except Exception as e2:
-                _logger.error(f"Keepalive reconnect failed: {e2}")
+            except Exception as e:
+                _logger.error(f"Keepalive send error: {e}")
+                self._trigger_reconnect()
+                break
 
     @ensure_connected
     async def _start_keepalive_task(self):
@@ -547,7 +444,6 @@ class MaxClient:
             }
         )
 
-
         if "error" in login_response["payload"]:
             raise Exception(login_response["payload"])
 
@@ -627,3 +523,12 @@ class MaxClient:
 
     def get_cached_favourite_chats(self):
         return self._cached_favourite_chats
+
+    async def test_force_disconnect(self):
+        """Принудительно разрывает текущее соединение."""
+        if self._connection is not None:
+            try:
+                # 1006 — абнормальное закрытие
+                self._connection = None
+            except Exception:
+                pass
