@@ -468,7 +468,6 @@ class MaxClient:
         return login_response
 
     @handle_errors
-    @ensure_connected
     async def logout(self):
         if not self._connection:
             _logger.warning("Logout called but no active connection.")
