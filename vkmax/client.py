@@ -489,6 +489,7 @@ class MaxClient:
             await self._connection.close()
 
             self._connection = None
+            self._session_token = None
             self._is_logged_in = False
             self._cached_chats = None
             self._pending.clear()
