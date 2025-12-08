@@ -55,6 +55,7 @@ def handle_errors(method: Callable):
 
 class MaxClient:
     def __init__(self):
+        self.app_version = APP_VERSION
         self._connection: Optional[ClientConnection] = None
         self._http_pool: Optional[aiohttp.ClientSession] = None
         self._is_logged_in: bool = False
@@ -328,7 +329,7 @@ class MaxClient:
                     "deviceName": "vkmax Python",
                     "headerUserAgent": USER_AGENT,
                     "deviceLocale": "ru-RU",
-                    "appVersion": APP_VERSION,
+                    "appVersion": self.app_version,
                     "screen": "956x1470 2.0x",
                     "timezone": "Asia/Vladivostok"
                 },
