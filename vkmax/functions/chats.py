@@ -51,8 +51,6 @@ async def get_chat(
 ):
     import time
 
-    # If from_message_id is not provided, use current timestamp in milliseconds
-    # This tells API to load messages around current time (i.e., latest messages)
     if from_message_id is None:
         from_message_id = int(time.time() * 1000)
 

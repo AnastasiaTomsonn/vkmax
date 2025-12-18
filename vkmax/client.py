@@ -3,14 +3,12 @@ import itertools
 import json
 import logging
 import uuid
-from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import aiohttp
 import websockets
-from websockets import ConnectionClosedOK, ConnectionClosedError, ConnectionClosed, Close
+from websockets import ConnectionClosedOK, ConnectionClosedError, Close
 from websockets.asyncio.client import ClientConnection
-
 from functools import wraps
 
 WS_HOST = "wss://ws-api.oneme.ru/websocket"
@@ -18,55 +16,64 @@ RPC_VERSION = 11
 APP_VERSION = "25.11.2"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
-_logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+_logger = logging.getLogger("MaxClient")
 
 
-def ensure_connected(method: Callable):
+def ensure_connected(method):
     @wraps(method)
     async def wrapper(self, *args, **kwargs):
-        if getattr(self, "_closing", False):
-            raise RuntimeError("Client is closing.")
-        if self._connection is None:
-            _logger.warning("Connection is None — reconnecting...")
-            self._trigger_reconnect()
-            await asyncio.sleep(0.1)
-
-        elif self._connection.state.name in ("CLOSING", "CLOSED"):
-            _logger.warning("Connection lost — triggering reconnect...")
-            self._trigger_reconnect()
-            await asyncio.sleep(0.1)
-        return await method(self, *args, **kwargs)
-
-    return wrapper
-
-
-def handle_errors(method: Callable):
-    @wraps(method)
-    async def wrapper(self, *args, **kwargs):
+        if self._closing:
+            raise RuntimeError("Client is closing")
+        if not self._connected and self._connected is None:
+            if self._reconnect_task:
+                _logger.info("Waiting for reconnect before sending...")
+                try:
+                    await asyncio.wait_for(self._reconnect_task, timeout=30)
+                except asyncio.TimeoutError:
+                    raise ConnectionClosedError(
+                        rcvd=Close(code=1006, reason="reconnect timeout"),
+                        sent=None
+                    )
+            else:
+                raise ConnectionClosedError(rcvd=Close(code=1006, reason="connection lost"), sent=None)
         try:
-            result = await method(self, *args, **kwargs)
-            return {"status": True, "result": result}
-        except Exception as e:
-            _logger.error(f"{method.__name__} ERROR: {e}")
-            return {"status": False, "message": e}
+            return await method(self, *args, **kwargs)
+        except ConnectionClosedError:
+            if not self._closing:
+                if not self._reconnect_task or self._reconnect_task.done():
+                    self._reconnect_task = asyncio.create_task(self._reconnect(), name="ws-reconnect")
+                _logger.info("Connection lost during send, waiting reconnect...")
+                await self._reconnect_task
+                return await method(self, *args, **kwargs)
+            else:
+                raise
 
     return wrapper
 
 
 class MaxClient:
-    def __init__(self):
-        self.app_version = APP_VERSION
+    def __init__(self, device_id: str = str(uuid.uuid4()), app_version: str = APP_VERSION):
+        self.device_id = device_id
+        self.app_version = app_version
+
         self._connection: Optional[ClientConnection] = None
         self._http_pool: Optional[aiohttp.ClientSession] = None
-        self._is_logged_in: bool = False
-        self._seq = itertools.count(1)
         self._keepalive_task: Optional[asyncio.Task] = None
         self._recv_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
         self._incoming_event_callback = None
         self._pending: dict[int, asyncio.Future] = {}
+        self._logout_future: Optional[asyncio.Future] = None
 
-        self._device_id = str(uuid.uuid4())
+        self._seq = itertools.count(1)
         self._session_token: Optional[str] = None
+        self._is_logged_in: bool = False
 
         self._video_pending = {}
         self._file_pending = {}
@@ -74,177 +81,135 @@ class MaxClient:
         self._cached_contacts = None
         self._cached_favourite_chats = None
 
-        # Locks to prevent concurrent connects/reconnects
         self._connect_lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
 
-        self._is_reconnecting = False
         self._closing = False
+        self._connected = False
 
-        self.is_test = True
+    def _fail_all_pending(self, exc: Exception):
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
+        self._pending.clear()
 
-    # --- WebSocket connection management ---
-    @handle_errors
-    async def connect(self):
-        if self._connection:
-            try:
-                await self._connection.close()
-            except Exception:
-                pass
-
-        _logger.info(f'Connecting to {WS_HOST}...')
-        self._connection = await websockets.connect(
-            WS_HOST,
-            origin=websockets.Origin('https://web.max.ru'),
-            user_agent_header=USER_AGENT
-        )
-
-        self._recv_task = asyncio.create_task(self._recv_loop(), name="ws-recv-loop")
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="ws-keepalive")
-        _logger.info("Connected and tasks started.")
-        return self._connection
-
-    async def _reconnect(self):
-        if self._is_reconnecting:
-            return
-
-        if self._closing:
-            return
-
-        self._is_reconnecting = True
-        _logger.warning("Reconnecting WebSocket...")
-
-        # Устанавливаем начальный backoff
-        backoff = getattr(self, "_backoff", 3)
-
-        while not self._closing:
-            try:
-                # Безопасно останавливаем таски и закрываем соединение
-                await self.disconnect()
-            except Exception as e:
-                _logger.error(f"Reconnect: disconnect failed: {e}")
-
-            _logger.info(f"Sleeping before reconnect: {backoff}s")
-            await asyncio.sleep(backoff)
-
-            try:
-                await self.connect()
-                _logger.info("Reconnect: connected")
-            except Exception as e:
-                _logger.error(f"Reconnect: connect failed: {e}")
-                backoff = min(backoff + 2, 30)
-                continue
-
-            try:
-                await asyncio.wait_for(self._send_hello_packet(), timeout=3)
-                _logger.info("Reconnect: hello sent")
-            except Exception as e:
-                _logger.error(f"Reconnect: hello failed: {e}")
-                backoff = min(backoff + 2, 30)
-                continue
-
-            if self._is_logged_in and hasattr(self, "_session_token"):
-                try:
-                    await asyncio.wait_for(self.login_by_token(self._session_token), timeout=5)
-                    _logger.info("Reconnect: login successful")
-                except Exception as e:
-                    _logger.error(f"Reconnect: login failed: {e}")
-                    backoff = min(backoff + 2, 30)
-                    continue
-
-            _logger.warning("Reconnected successfully.")
-            break
-
-        self._is_reconnecting = False
-
-    def _trigger_reconnect(self):
-        if not self._is_reconnecting:
-            asyncio.create_task(self._reconnect())
-
-    async def disconnect(self):
-        self._closing = True
-        await self._stop_keepalive_task()
-        self._recv_task.cancel()
-        if self._connection:
-            try:
-                await self._connection.close()
-            except Exception:
-                pass
-            self._connection = None
-        if self._http_pool:
-            await self._http_pool.close()
-            self._http_pool = None
-        self._closing = False
-
-    @ensure_connected
-    async def invoke_method(self, opcode: int, payload: dict[str, Any], retries: int = 2):
-        seq = next(self._seq)
-
-        request = {
-            "ver": RPC_VERSION,
-            "cmd": 0,
-            "seq": seq,
-            "opcode": opcode,
-            "payload": payload
-        }
-        _logger.info(f'-> REQUEST: {request}')
-
-        future = asyncio.get_event_loop().create_future()
-        self._pending[seq] = future
-
-        try:
-            await self._connection.send(json.dumps(request))
-        except websockets.exceptions.ConnectionClosed:
-            _logger.warning('got ws disconnect in invoke_method')
-            _logger.info('reconnecting')
-            self._trigger_reconnect()
-            if retries > 0:
-                _logger.info('retrying invoke_method after reconnect')
-                await self.invoke_method(opcode, payload, retries - 1)
-            return
-
-        try:
-            response = await asyncio.wait_for(future, timeout=30)
-        except asyncio.TimeoutError:
-            await self._pending.pop(seq, None)
-            raise TimeoutError("invoke_method timeout waiting for response")
-        except Exception as e:
-            await self._pending.pop(seq, None)
-            raise
-
-        _logger.info(f'<- RESPONSE: {response}')
-        return response
+    async def set_app_version(self, appversion):
+        self.app_version = appversion
 
     async def set_callback(self, function):
         if not asyncio.iscoroutinefunction(function):
             raise TypeError('callback must be async')
         self._incoming_event_callback = function
 
+    # ---------------- WebSocket ----------------
+    async def connect(self):
+        async with self._connect_lock:
+            if self._connection:
+                return
+
+            _logger.info(f"Connecting to {WS_HOST}...")
+            self._connection = await websockets.connect(
+                WS_HOST,
+                origin=websockets.Origin('https://web.max.ru'),
+                user_agent_header=USER_AGENT,
+                ping_interval=None
+            )
+            self._connected = True
+
+            self._recv_task = asyncio.create_task(self._recv_loop(), name="ws-recv-loop")
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="ws-keepalive")
+            await self._send_hello_packet()
+            _logger.info("WebSocket connected")
+
+    async def _reconnect(self):
+        async with self._reconnect_lock:
+            if self._closing:
+                return
+            _logger.warning("Starting reconnect sequence")
+            backoff = 2
+            while not self._closing:
+                try:
+                    await self.disconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(backoff)
+                try:
+                    await self.connect()
+                    if self._session_token:
+                        await self._login_by_token_internal(self._session_token)
+                    _logger.warning("Reconnect successful")
+                    return
+                except Exception as e:
+                    _logger.error(f"Reconnect failed: {e}")
+                    backoff = min(backoff * 2, 30)
+
+    async def disconnect(self):
+        if self._connection is None:
+            return
+        try:
+            self._connected = False
+            if self._keepalive_task:
+                self._keepalive_task.cancel()
+            if self._recv_task:
+                self._recv_task.cancel()
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+            if self._http_pool:
+                await self._http_pool.close()
+                self._http_pool = None
+        except Exception:
+            pass
+        finally:
+            self._connection = None
+            self._keepalive_task = None
+            self._recv_task = None
+
+    @ensure_connected
+    async def invoke_method(self, opcode: int, payload: dict[str, Any]):
+        seq = next(self._seq)
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[seq] = fut
+        try:
+            await self._connection.send(json.dumps({
+                "ver": RPC_VERSION,
+                "cmd": 0,
+                "seq": seq,
+                "opcode": opcode,
+                "payload": payload
+            }))
+        except ConnectionClosedError:
+            raise
+        return await fut
+
     async def _recv_loop(self):
         try:
-            async for packet in self._connection:
+            async for raw in self._connection:
                 try:
-                    packet = json.loads(packet)
-                except Exception as e:
-                    _logger.error(f"JSON decode error in recv loop: {e}")
+                    packet = json.loads(raw)
+                except Exception:
                     continue
 
                 seq = packet.get("seq")
                 if seq is not None:
-                    future = self._pending.pop(seq, None)
-                    if future and not future.done():
-                        future.set_result(packet)
-                        continue
+                    fut = self._pending.pop(seq, None)
+                    if fut and not fut.done():
+                        fut.set_result(packet)
+                    continue
 
-                if packet.get("opcode") == 136:
-                    payload = packet.get("payload", {})
+                opcode = packet.get("opcode")
+                payload = packet.get("payload", {})
+
+                if opcode == 20 and self._logout_future and not self._logout_future.done():
+                    self._logout_future.set_result(True)
+
+                if opcode == 136:
                     future = None
-
                     if "videoId" in payload:
                         future = self._video_pending.pop(payload["videoId"], None)
                     elif "fileId" in payload:
                         future = self._file_pending.pop(payload["fileId"], None)
-
                     if future and not future.done():
                         future.set_result(None)
 
@@ -254,253 +219,192 @@ class MaxClient:
                     except Exception as e:
                         _logger.exception(f"Failed to schedule incoming_event_callback: {e}")
         except asyncio.CancelledError:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _logger.info(f"[{ts}] Receiver cancelled")
             return
-
-        except ConnectionClosedOK as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _logger.info(f"[{ts}] WebSocket closed gracefully: {e}")
-            return
-
-        except ConnectionClosedError as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _logger.warning(f"[{ts}] ConnectionClosedError ({e}) — reconnecting...")
-            self._connection = None
-            self._trigger_reconnect()
-            return
-
+        except (ConnectionClosedError, ConnectionClosedOK) as e:
+            _logger.warning(f"WebSocket closed: {e}")
         except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _logger.error(f"[{ts}] Recv loop exception ({e}) — reconnecting...")
-            self._connection = None
-            self._trigger_reconnect()
-            return
+            _logger.exception(f"Recv loop crashed: {e}")
+        finally:
+            self._connected = False
+            if not self._closing:
+                self._connection = None
+                self._fail_all_pending(
+                    ConnectionClosedError(rcvd=Close(code=1006, reason="connection lost"), sent=None))
+                if not self._reconnect_task or self._reconnect_task.done():
+                    self._reconnect_task = asyncio.create_task(
+                        self._reconnect(), name="ws-reconnect"
+                    )
+            else:
+                _logger.info("Connection closed intentionally, no reconnect")
 
     # --- Keepalive system
-    @ensure_connected
-    async def _send_keepalive_packet(self):
-        await self.invoke_method(
-            opcode=1,
-            payload={"interactive": False}
-        )
-
-    @ensure_connected
     async def _keepalive_loop(self):
-        _logger.info(f'keepalive task started')
-        while True:
-            try:
-                await self._send_keepalive_packet()
+        try:
+            while True:
+                if self._connection is None:
+                    return
+                await self._connection.send(json.dumps({
+                    "ver": RPC_VERSION,
+                    "cmd": 0,
+                    "seq": next(self._seq),
+                    "opcode": 1,
+                    "payload": {"interactive": False}
+                }))
                 await asyncio.sleep(12)
-            except Exception as e:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                _logger.error(f"[{ts}] Keepalive send error ({e}) — reconnecting...")
-                self._trigger_reconnect()
-                break
-
-    @ensure_connected
-    async def _start_keepalive_task(self):
-        if self._keepalive_task:
+        except asyncio.CancelledError:
             return
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-        return
+        except Exception:
+            return
+
+    async def _start_keepalive_task(self):
+        if not self._keepalive_task:
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     async def _stop_keepalive_task(self):
-        if not self._keepalive_task:
-            return
-        try:
+        if self._keepalive_task:
             self._keepalive_task.cancel()
-        except Exception:
-            pass
-        self._keepalive_task = None
-        return
+            self._keepalive_task = None
 
     # --- Authentication ---
+    async def _login_by_token_internal(self, token: str):
+        if self._session_token != token:
+            self._session_token = token
 
-    @ensure_connected
+        response = await self.invoke_method(
+            opcode=19,
+            payload={"interactive": True, "token": token, "chatsSync": 0, "contactsSync": 0,
+                     "presenceSync": 0, "draftsSync": 0, "chatsCount": 40}
+        )
+
+        payload = response.get("payload", {})
+        if payload.get("error"):
+            return response
+
+        if payload.get("chats"):
+            self._cached_chats = payload["chats"]
+            _logger.info(f"Cached {len(payload['chats'])} chats from login")
+
+        if payload.get("contacts"):
+            self._cached_contacts = payload["contacts"]
+            _logger.info(f"Cached {len(payload['contacts'])} contacts from login")
+
+        chats = payload.get("config", {}).get("chats")
+        if chats:
+            self._cached_favourite_chats = chats
+            _logger.info(f"Cached {len(chats)} favourite chats from login")
+
+        self._is_logged_in = True
+        await self._start_keepalive_task()
+        return response
+
     async def _send_hello_packet(self):
         return await self.invoke_method(
             opcode=6,
             payload={
                 "userAgent": {
                     "deviceType": "WEB",
-                    "locale": "ru_RU",
+                    "locale": "ru",
                     "osVersion": "macOS",
-                    "deviceName": "vkmax Python",
+                    "deviceName": "MAX WEB",
                     "headerUserAgent": USER_AGENT,
                     "deviceLocale": "ru-RU",
                     "appVersion": self.app_version,
                     "screen": "956x1470 2.0x",
-                    "timezone": "Asia/Vladivostok"
+                    "timezone": "Europe/Moscow"
                 },
-                "deviceId": self._device_id
+                "deviceId": self.device_id
             }
         )
 
-    @handle_errors
     @ensure_connected
-    async def send_code(self, phone: str) -> str:
-        """:returns: Login token."""
-        await self._send_hello_packet()
-        start_auth_response = await self.invoke_method(
-            opcode=17,
-            payload={
-                "phone": phone,
-                "type": "START_AUTH",
-                "language": "ru"
-            }
-        )
+    async def send_code(self, phone: str, send_type: str = "RESEND"):
+        return await self.invoke_method(opcode=17, payload={"phone": phone, "type": send_type, "language": "ru"})
 
-        if "error" in start_auth_response["payload"]:
-            raise Exception(start_auth_response["payload"])
-
-        return start_auth_response["payload"]["token"]
-
-    @handle_errors
     @ensure_connected
     async def sign_in(self, sms_token: str, sms_code: int):
-        verification_response = await self.invoke_method(
-            opcode=18,
-            payload={
-                "token": sms_token,
-                "verifyCode": str(sms_code),
-                "authTokenType": "CHECK_CODE"
-            }
-        )
+        response = await self.invoke_method(opcode=18, payload={
+            "token": sms_token,
+            "verifyCode": str(sms_code),
+            "authTokenType": "CHECK_CODE"
+        })
+        if "error" not in response.get("payload", {}):
+            self._is_logged_in = True
+            await self._start_keepalive_task()
+        return response
 
-        if "error" in verification_response["payload"]:
-            raise Exception(verification_response["payload"])
-
-        if "passwordChallenge" in verification_response["payload"].keys():
-            return verification_response
-
-        try:
-            phone = verification_response["payload"]["profile"]["phone"]
-        except Exception:
-            phone = '[?]'
-            _logger.warning('Got no phone number in server response')
-        _logger.info(f'Successfully logged in as {phone}')
-
-        self._is_logged_in = True
-        await self._start_keepalive_task()
-
-        return verification_response
-
-    @handle_errors
     @ensure_connected
-    async def sing_in_password(self, track_id: str, password: str):
-        verification_response = await self.invoke_method(
-            opcode=115,
-            payload={
-                "trackId": track_id,
-                "password": password
-            }
-        )
+    async def sign_in_password(self, track_id: str, password: str):
+        response = await self.invoke_method(opcode=115, payload={"trackId": track_id, "password": password})
+        if "error" not in response.get("payload", {}):
+            self._is_logged_in = True
+        return response
 
-        if "error" in verification_response["payload"]:
-            raise Exception(verification_response["payload"])
-
-        try:
-            phone = verification_response["payload"]["profile"]["phone"]
-        except Exception:
-            phone = '[?]'
-            _logger.warning('Got no phone number in server response')
-        _logger.info(f'Successfully logged in as {phone}')
-
-        self._is_logged_in = True
-
-        return verification_response
-
-    @handle_errors
     @ensure_connected
     async def login_by_token(self, token: str):
-        if token and self._session_token != token:
-            self._session_token = token
-        await self._send_hello_packet()
-        _logger.info("using session")
-        login_response = await self.invoke_method(
-            opcode=19,
-            payload={
-                "interactive": True,
-                "token": token,
-                "chatsSync": 0,
-                "contactsSync": 0,
-                "presenceSync": 0,
-                "draftsSync": 0,
-                "chatsCount": 40
-            }
-        )
+        return await self._login_by_token_internal(token)
 
-        if "error" in login_response["payload"]:
-            raise Exception(login_response["payload"])
-
-        try:
-            phone = login_response["payload"]["profile"]["phone"]
-        except Exception:
-            phone = '[?]'
-            _logger.warning('Got no phone number in server response')
-        _logger.info(f'Successfully logged in as {phone}')
-
-        # Cache chats from login response
-        if "chats" in login_response["payload"]:
-            self._cached_chats = login_response["payload"]["chats"]
-            _logger.info(
-                f"Cached {len(login_response['payload']['chats'])} chats from login"
-            )
-
-        # Cache chats from login response
-        if "contacts" in login_response["payload"]:
-            self._cached_contacts = login_response["payload"]["contacts"]
-            _logger.info(
-                f"Cached {len(login_response['payload']['contacts'])} chats from login"
-            )
-
-        if "config" in login_response["payload"]:
-            chats = login_response.get("payload", {}).get("config", {}).get("chats")
-            if chats:
-                self._cached_favourite_chats = chats
-                _logger.info(
-                    f"Cached {len(chats)} favourite chats from login"
-                )
-
-        self._is_logged_in = True
-        await self._start_keepalive_task()
-
-        return login_response
-
-    @handle_errors
-    async def logout(self):
-        if not self._connection:
+    async def logout(self, timeout: int = 12):
+        if self._connection is None:
             _logger.warning("Logout called but no active connection.")
             return
 
+        if self._logout_future:
+            try:
+                await asyncio.wait_for(self._logout_future, timeout=timeout)
+            except asyncio.TimeoutError:
+                _logger.warning("Logout timed out waiting for server response.")
+            return
+
+        _logger.info("Logout started")
+        self._closing = True
+        self._connected = False
+        self._logout_future = asyncio.get_running_loop().create_future()
+
         try:
             try:
-                await self.invoke_method(
-                    opcode=20,
-                    payload={}
-                )
+                await self._connection.send(
+                    json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20}))
             except Exception as e:
                 _logger.warning(f"Server logout request failed: {e}")
+                if not self._logout_future.done():
+                    self._logout_future.set_result(True)
 
-            if self._keepalive_task:
-                await self._stop_keepalive_task()
+            try:
+                await asyncio.wait_for(self._logout_future, timeout=timeout)
+            except asyncio.TimeoutError:
+                _logger.warning("Logout timed out waiting for server response.")
 
-            await self._connection.close()
+            await self._stop_keepalive_task()
+            if self._recv_task:
+                self._recv_task.cancel()
+                try:
+                    await self._recv_task
+                except asyncio.CancelledError:
+                    pass
 
+            if self._http_pool:
+                await self._http_pool.close()
+                self._http_pool = None
+
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+        finally:
             self._connection = None
             self._session_token = None
             self._is_logged_in = False
+
             self._cached_chats = None
+            self._cached_contacts = None
+            self._cached_favourite_chats = None
+
             self._pending.clear()
             self._file_pending.clear()
             self._video_pending.clear()
+            _logger.info("Logout completed, state cleared")
 
-            _logger.info("Logout successful, connection closed and state cleared.")
-
-        except Exception as e:
-            _logger.error(f"LOGOUT_ERROR: {e}")
-            raise
+            self._logout_future = None
 
     def get_cached_chats(self):
         return self._cached_chats
@@ -510,12 +414,3 @@ class MaxClient:
 
     def get_cached_favourite_chats(self):
         return self._cached_favourite_chats
-
-    async def test_force_disconnect(self):
-        """Принудительно разрывает текущее соединение."""
-        if self._connection is not None:
-            try:
-                # 1006 — абнормальное закрытие
-                self._connection = None
-            except Exception:
-                pass
