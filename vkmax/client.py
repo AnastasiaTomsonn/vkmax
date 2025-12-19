@@ -30,7 +30,7 @@ def ensure_connected(method):
     async def wrapper(self, *args, **kwargs):
         if self._closing:
             raise RuntimeError("Client is closing")
-        if not self._connected and self._connected is None:
+        if not self._connected:
             if self._reconnect_task:
                 _logger.info("Waiting for reconnect before sending...")
                 try:
@@ -115,6 +115,7 @@ class MaxClient:
                 ping_interval=None
             )
             self._connected = True
+            self._closing = False
 
             self._recv_task = asyncio.create_task(self._recv_loop(), name="ws-recv-loop")
             self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="ws-keepalive")
@@ -147,6 +148,7 @@ class MaxClient:
         if self._connection is None:
             return
         try:
+            self._closing = True
             self._connected = False
             if self._keepalive_task:
                 self._keepalive_task.cancel()
@@ -328,83 +330,40 @@ class MaxClient:
             "authTokenType": "CHECK_CODE"
         })
         if "error" not in response.get("payload", {}):
-            self._is_logged_in = True
             await self._start_keepalive_task()
         return response
 
     @ensure_connected
     async def sign_in_password(self, track_id: str, password: str):
         response = await self.invoke_method(opcode=115, payload={"trackId": track_id, "password": password})
-        if "error" not in response.get("payload", {}):
-            self._is_logged_in = True
         return response
 
     @ensure_connected
     async def login_by_token(self, token: str):
-        return await self._login_by_token_internal(token)
+        if not self._is_logged_in:
+            return await self._login_by_token_internal(token)
 
-    async def logout(self, timeout: int = 12):
-        if self._connection is None:
+    async def logout(self):
+        if not self._connection or not self._connected:
             _logger.warning("Logout called but no active connection.")
-            return
-
-        if self._logout_future:
-            try:
-                await asyncio.wait_for(self._logout_future, timeout=timeout)
-            except asyncio.TimeoutError:
-                _logger.warning("Logout timed out waiting for server response.")
-            return
-
-        _logger.info("Logout started")
-        self._closing = True
-        self._connected = False
-        self._logout_future = asyncio.get_running_loop().create_future()
-
-        try:
+        else:
             try:
                 await self._connection.send(
-                    json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20}))
+                    json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20})
+                )
             except Exception as e:
                 _logger.warning(f"Server logout request failed: {e}")
-                if not self._logout_future.done():
-                    self._logout_future.set_result(True)
 
-            try:
-                await asyncio.wait_for(self._logout_future, timeout=timeout)
-            except asyncio.TimeoutError:
-                _logger.warning("Logout timed out waiting for server response.")
+        self._session_token = None
+        self._is_logged_in = False
+        self._cached_chats = None
+        self._cached_contacts = None
+        self._cached_favourite_chats = None
+        self._pending.clear()
+        self._file_pending.clear()
+        self._video_pending.clear()
 
-            await self._stop_keepalive_task()
-            if self._recv_task:
-                self._recv_task.cancel()
-                try:
-                    await self._recv_task
-                except asyncio.CancelledError:
-                    pass
-
-            if self._http_pool:
-                await self._http_pool.close()
-                self._http_pool = None
-
-            try:
-                await self._connection.close()
-            except Exception:
-                pass
-        finally:
-            self._connection = None
-            self._session_token = None
-            self._is_logged_in = False
-
-            self._cached_chats = None
-            self._cached_contacts = None
-            self._cached_favourite_chats = None
-
-            self._pending.clear()
-            self._file_pending.clear()
-            self._video_pending.clear()
-            _logger.info("Logout completed, state cleared")
-
-            self._logout_future = None
+        _logger.info("User logged out, connection still alive.")
 
     def get_cached_chats(self):
         return self._cached_chats

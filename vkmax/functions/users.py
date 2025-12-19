@@ -3,11 +3,6 @@ from vkmax.client import MaxClient
 
 async def get_contacts(client: MaxClient):
     cached_response = client.get_cached_contacts()
-    if cached_response is None:
-        raise Exception(
-            "No chats cached. Please call login_by_token() or sign_in() first. "
-            "Chats are automatically loaded during login."
-        )
     return cached_response
 
 

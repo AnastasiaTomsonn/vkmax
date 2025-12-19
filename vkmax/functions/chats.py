@@ -11,13 +11,6 @@ def get_chats(
         drafts_sync: int = 0,
 ):
     cached_response = client.get_cached_chats()
-
-    if cached_response is None:
-        raise Exception(
-            "No chats cached. Please call login_by_token() or sign_in() first. "
-            "Chats are automatically loaded during login."
-        )
-
     return cached_response
 
 
@@ -31,13 +24,6 @@ def get_favourite_chats(
 ):
 
     cached_response = client.get_cached_favourite_chats()
-
-    if cached_response is None:
-        raise Exception(
-            "No favourite chats cached. Please call login_by_token() or sign_in() first. "
-            "Chats are automatically loaded during login."
-        )
-
     return cached_response
 
 
