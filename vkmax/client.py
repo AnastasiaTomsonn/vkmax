@@ -198,7 +198,7 @@ class MaxClient:
                     fut = self._pending.pop(seq, None)
                     if fut and not fut.done():
                         fut.set_result(packet)
-                    continue
+                        continue
 
                 opcode = packet.get("opcode")
                 payload = packet.get("payload", {})
@@ -343,16 +343,34 @@ class MaxClient:
         if not self._is_logged_in:
             return await self._login_by_token_internal(token)
 
-    async def logout(self):
+    async def logout(self, timeout: int = 12):
         if not self._connection or not self._connected:
             _logger.warning("Logout called but no active connection.")
-        else:
+
+        if self._logout_future:
             try:
-                await self._connection.send(
-                    json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20})
-                )
-            except Exception as e:
-                _logger.warning(f"Server logout request failed: {e}")
+                await asyncio.wait_for(self._logout_future, timeout=timeout)
+            except asyncio.TimeoutError:
+                _logger.warning("Logout timed out waiting for server response.")
+            return
+
+        _logger.info("Logout started")
+        self._closing = True
+        self._connected = False
+        self._logout_future = asyncio.get_running_loop().create_future()
+
+        try:
+            await self._connection.send(
+                json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20}))
+        except Exception as e:
+            _logger.warning(f"Server logout request failed: {e}")
+            if not self._logout_future.done():
+                self._logout_future.set_result(True)
+
+        try:
+            await asyncio.wait_for(self._logout_future, timeout=timeout)
+        except asyncio.TimeoutError:
+            _logger.warning("Logout timed out waiting for server response.")
 
         self._session_token = None
         self._is_logged_in = False
@@ -364,6 +382,7 @@ class MaxClient:
         self._video_pending.clear()
 
         _logger.info("User logged out, connection still alive.")
+        self._logout_future = None
 
     def get_cached_chats(self):
         return self._cached_chats
