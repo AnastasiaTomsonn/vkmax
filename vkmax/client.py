@@ -13,7 +13,7 @@ from functools import wraps
 
 WS_HOST = "wss://ws-api.oneme.ru/websocket"
 RPC_VERSION = 11
-APP_VERSION = "25.11.2"
+APP_VERSION = "25.12.13"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
 logging.basicConfig(
@@ -119,8 +119,9 @@ class MaxClient:
 
             self._recv_task = asyncio.create_task(self._recv_loop(), name="ws-recv-loop")
             self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="ws-keepalive")
-            await self._send_hello_packet()
-            _logger.info("WebSocket connected")
+            r = await self._send_hello_packet()
+
+            _logger.info(f"WebSocket connected {r}")
 
     async def _reconnect(self):
         async with self._reconnect_lock:
@@ -318,6 +319,43 @@ class MaxClient:
                 "deviceId": self.device_id
             }
         )
+
+    @ensure_connected
+    async def get_qr(self):
+        resp = await self.invoke_method(opcode=288, payload={})
+        return resp
+
+    @ensure_connected
+    async def auth_with_qr(self, resp, timeout: int = 120):
+        payload = resp.get("payload", {})
+        qr_link = payload.get("qrLink")
+        track_id = payload.get("trackId")
+        polling_interval = payload.get("pollingInterval", 5000) / 1000
+
+        if not track_id:
+            raise RuntimeError("Failed to get trackId for QR code")
+
+        start_time = asyncio.get_running_loop().time()
+
+        while True:
+            try:
+                resp = await self.invoke_method(opcode=291, payload={"trackId": track_id})
+                token_payload = resp.get("payload")
+                if token_payload and "tokenAttrs" in token_payload:
+                    break
+            except Exception:
+                pass
+
+            if asyncio.get_running_loop().time() - start_time > timeout:
+                raise TimeoutError("QR authorization was not completed within the allotted time.")
+
+            await asyncio.sleep(polling_interval)
+
+        return {
+            "qrLink": qr_link,
+            "trackId": track_id,
+            "tokenPayload": token_payload
+        }
 
     @ensure_connected
     async def send_code(self, phone: str, send_type: str = "RESEND"):
