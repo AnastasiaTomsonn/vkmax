@@ -34,7 +34,7 @@ def ensure_connected(method):
             if self._reconnect_task:
                 _logger.info("Waiting for reconnect before sending...")
                 try:
-                    await asyncio.wait_for(self._reconnect_task, timeout=30)
+                    await asyncio.wait_for(asyncio.shield(self._reconnect_task), timeout=30)
                 except asyncio.TimeoutError:
                     raise ConnectionClosedError(
                         rcvd=Close(code=1006, reason="reconnect timeout"),
@@ -49,7 +49,7 @@ def ensure_connected(method):
                 if not self._reconnect_task or self._reconnect_task.done():
                     self._reconnect_task = asyncio.create_task(self._reconnect(), name="ws-reconnect")
                 _logger.info("Connection lost during send, waiting reconnect...")
-                await self._reconnect_task
+                await asyncio.shield(self._reconnect_task)
                 return await method(self, *args, **kwargs)
             else:
                 raise
@@ -139,6 +139,7 @@ class MaxClient:
                     if self._session_token:
                         await self._login_by_token_internal(self._session_token)
                     _logger.warning("Reconnect successful")
+                    self._reconnect_task = None
                     return
                 except Exception as e:
                     _logger.error(f"Reconnect failed: {e}")
