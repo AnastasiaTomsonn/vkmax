@@ -204,7 +204,6 @@ class MaxClient:
         if self._connection is None:
             return
         try:
-            self._closing = True
             self._connected = False
             if self._keepalive_task:
                 self._keepalive_task.cancel()
