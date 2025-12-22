@@ -31,6 +31,45 @@ def ensure_connected(method):
         if self._closing:
             raise RuntimeError("Client is closing")
 
+        async def wait_reconnect():
+            if not self._reconnect_task or self._reconnect_task.done():
+                self._reconnect_task = asyncio.create_task(
+                    self._reconnect(), name="ws-reconnect"
+                )
+            await asyncio.wait_for(asyncio.shield(self._reconnect_task), timeout=30)
+
+        if self._connected:
+            try:
+                pong = await self._connection.ping()
+                await asyncio.wait_for(pong, timeout=5)
+            except Exception:
+                _logger.info("Ping failed, reconnecting...")
+                self._connected = False
+                await wait_reconnect()
+
+        if not self._connected:
+            await wait_reconnect()
+
+        try:
+            return await method(self, *args, **kwargs)
+
+        except ConnectionClosedError:
+            if self._closing:
+                raise
+
+            _logger.info("Connection lost during send, reconnecting...")
+            await wait_reconnect()
+            return await method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def ensure_connected1(method):
+    @wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        if self._closing:
+            raise RuntimeError("Client is closing")
+
         if self._connected:
             try:
                 pong_waiter = await self._connection.ping()
@@ -332,8 +371,17 @@ class MaxClient:
 
     @ensure_connected
     async def get_qr(self):
-        resp = await self.invoke_method(opcode=288, payload={})
-        return resp
+        try:
+            resp = await self.invoke_method(opcode=288, payload={})
+            payload = resp.get("payload", {})
+            if not payload.get("trackId"):
+                _logger.warning("QR response without trackId")
+                return None
+            return resp
+
+        except Exception as e:
+            _logger.error(f"get_qr failed: {e}")
+            return None
 
     async def auth_with_qr(self, resp, timeout: int = 120):
         payload = resp.get("payload", {})
@@ -344,19 +392,46 @@ class MaxClient:
             return None
         start_time = asyncio.get_running_loop().time()
         while True:
-            try:
-                resp = await self.invoke_method(opcode=289, payload={"trackId": track_id})
-                token_payload = resp.get("payload", {}).get("status", {})
-                login_available = token_payload.get("loginAvailable", False)
-                if login_available:
-                    login_resp = await self.invoke_method(opcode=291, payload={"trackId": track_id})
-                    login_payload = login_resp.get("payload", {})
-                    return login_payload
-            except Exception as e:
-                _logger.warning(f"Polling error: {e}")
             if asyncio.get_running_loop().time() - start_time > timeout:
-                _logger.warning("QR authorization was not completed within the allotted time.")
+                _logger.warning("QR authorization timeout")
                 return None
+
+            try:
+                resp = await asyncio.wait_for(
+                    self.invoke_method(opcode=289, payload={"trackId": track_id}),
+                    timeout=10
+                )
+
+                if not resp:
+                    _logger.warning("QR polling: empty response")
+                    await asyncio.sleep(polling_interval)
+                    continue
+
+                payload = resp.get("payload")
+                if not isinstance(payload, dict):
+                    _logger.warning(f"QR polling: invalid payload {payload}")
+                    await asyncio.sleep(polling_interval)
+                    continue
+
+                status = payload.get("status", {})
+                if not isinstance(status, dict):
+                    _logger.warning(f"QR polling: invalid status {status}")
+                    await asyncio.sleep(polling_interval)
+                    continue
+
+                if status.get("loginAvailable"):
+                    login_resp = await asyncio.wait_for(
+                        self.invoke_method(opcode=291, payload={"trackId": track_id}),
+                        timeout=10
+                    )
+                    return login_resp.get("payload", {})
+            except asyncio.CancelledError:
+                _logger.info("QR polling cancelled")
+                raise
+            except Exception as e:
+                _logger.warning(f"QR polling transient error: {e}")
+                await asyncio.sleep(polling_interval)
+
             await asyncio.sleep(polling_interval)
 
     @ensure_connected
