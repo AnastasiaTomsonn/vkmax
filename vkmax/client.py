@@ -30,6 +30,15 @@ def ensure_connected(method):
     async def wrapper(self, *args, **kwargs):
         if self._closing:
             raise RuntimeError("Client is closing")
+
+        if self._connected:
+            try:
+                pong_waiter = await self._connection.ping()
+                await asyncio.wait_for(pong_waiter, timeout=5)
+            except Exception:
+                _logger.info("Ping failed, triggering reconnect...")
+                self._connected = False
+
         if not self._connected:
             if self._reconnect_task:
                 _logger.info("Waiting for reconnect before sending...")
@@ -45,14 +54,21 @@ def ensure_connected(method):
         try:
             return await method(self, *args, **kwargs)
         except ConnectionClosedError:
-            if not self._closing:
-                if not self._reconnect_task or self._reconnect_task.done():
-                    self._reconnect_task = asyncio.create_task(self._reconnect(), name="ws-reconnect")
-                _logger.info("Connection lost during send, waiting reconnect...")
-                await asyncio.shield(self._reconnect_task)
-                return await method(self, *args, **kwargs)
-            else:
+            if self._closing:
                 raise
+            _logger.info("Connection lost during send, waiting reconnect...")
+            if not self._reconnect_task or self._reconnect_task.done():
+                self._reconnect_task = asyncio.create_task(self._reconnect(), name="ws-reconnect")
+            try:
+                await asyncio.wait_for(asyncio.shield(self._reconnect_task), timeout=30)
+            except asyncio.TimeoutError:
+                _logger.warning("Reconnect task timed out, cancelling and starting new reconnect...")
+                if not self._reconnect_task.done():
+                    self._reconnect_task.cancel()
+                self._reconnect_task = asyncio.create_task(self._reconnect(), name="ws-reconnect")
+                await asyncio.wait_for(asyncio.shield(self._reconnect_task), timeout=30)
+
+            return await method(self, *args, **kwargs)
 
     return wrapper
 
@@ -69,7 +85,6 @@ class MaxClient:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._incoming_event_callback = None
         self._pending: dict[int, asyncio.Future] = {}
-        self._logout_future: Optional[asyncio.Future] = None
 
         self._seq = itertools.count(1)
         self._session_token: Optional[str] = None
@@ -205,9 +220,6 @@ class MaxClient:
                 opcode = packet.get("opcode")
                 payload = packet.get("payload", {})
 
-                if opcode == 20 and self._logout_future and not self._logout_future.done():
-                    self._logout_future.set_result(True)
-
                 if opcode == 136:
                     future = None
                     if "videoId" in payload:
@@ -320,42 +332,33 @@ class MaxClient:
             }
         )
 
-    @ensure_connected
     async def get_qr(self):
         resp = await self.invoke_method(opcode=288, payload={})
         return resp
 
-    @ensure_connected
     async def auth_with_qr(self, resp, timeout: int = 120):
         payload = resp.get("payload", {})
-        qr_link = payload.get("qrLink")
         track_id = payload.get("trackId")
         polling_interval = payload.get("pollingInterval", 5000) / 1000
-
         if not track_id:
-            raise RuntimeError("Failed to get trackId for QR code")
-
+            _logger.warning("Failed to get trackId for QR code")
+            return None
         start_time = asyncio.get_running_loop().time()
-
         while True:
             try:
-                resp = await self.invoke_method(opcode=291, payload={"trackId": track_id})
-                token_payload = resp.get("payload")
-                if token_payload and "tokenAttrs" in token_payload:
-                    break
-            except Exception:
-                pass
-
+                resp = await self.invoke_method(opcode=289, payload={"trackId": track_id})
+                token_payload = resp.get("payload", {}).get("status", {})
+                login_available = token_payload.get("loginAvailable", False)
+                if login_available:
+                    login_resp = await self.invoke_method(opcode=291, payload={"trackId": track_id})
+                    login_payload = login_resp.get("payload", {})
+                    return login_payload
+            except Exception as e:
+                _logger.warning(f"Polling error: {e}")
             if asyncio.get_running_loop().time() - start_time > timeout:
-                raise TimeoutError("QR authorization was not completed within the allotted time.")
-
+                _logger.warning("QR authorization was not completed within the allotted time.")
+                return None
             await asyncio.sleep(polling_interval)
-
-        return {
-            "qrLink": qr_link,
-            "trackId": track_id,
-            "tokenPayload": token_payload
-        }
 
     @ensure_connected
     async def send_code(self, phone: str, send_type: str = "RESEND"):
@@ -382,34 +385,18 @@ class MaxClient:
         if not self._is_logged_in:
             return await self._login_by_token_internal(token)
 
-    async def logout(self, timeout: int = 12):
-        if not self._connection or not self._connected:
-            _logger.warning("Logout called but no active connection.")
+    @ensure_connected
+    async def _send_logout(self):
+        return await self._connection.send(
+            json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20})
+        )
 
-        if self._logout_future:
-            try:
-                await asyncio.wait_for(self._logout_future, timeout=timeout)
-            except asyncio.TimeoutError:
-                _logger.warning("Logout timed out waiting for server response.")
-            return
-
+    async def logout(self):
         _logger.info("Logout started")
-        self._closing = True
-        self._connected = False
-        self._logout_future = asyncio.get_running_loop().create_future()
-
         try:
-            await self._connection.send(
-                json.dumps({"ver": RPC_VERSION, "cmd": 0, "seq": next(self._seq), "opcode": 20}))
+            await self._send_logout()
         except Exception as e:
             _logger.warning(f"Server logout request failed: {e}")
-            if not self._logout_future.done():
-                self._logout_future.set_result(True)
-
-        try:
-            await asyncio.wait_for(self._logout_future, timeout=timeout)
-        except asyncio.TimeoutError:
-            _logger.warning("Logout timed out waiting for server response.")
 
         self._session_token = None
         self._is_logged_in = False
@@ -421,7 +408,6 @@ class MaxClient:
         self._video_pending.clear()
 
         _logger.info("User logged out, connection still alive.")
-        self._logout_future = None
 
     def get_cached_chats(self):
         return self._cached_chats
