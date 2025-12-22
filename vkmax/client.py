@@ -283,9 +283,6 @@ class MaxClient:
 
     # --- Authentication ---
     async def _login_by_token_internal(self, token: str):
-        if self._session_token != token:
-            self._session_token = token
-
         response = await self.invoke_method(
             opcode=19,
             payload={"interactive": True, "token": token, "chatsSync": 0, "contactsSync": 0,
@@ -296,6 +293,7 @@ class MaxClient:
         if payload.get("error"):
             return response
 
+        self._session_token = token
         if payload.get("chats"):
             self._cached_chats = payload["chats"]
             _logger.info(f"Cached {len(payload['chats'])} chats from login")
@@ -332,6 +330,7 @@ class MaxClient:
             }
         )
 
+    @ensure_connected
     async def get_qr(self):
         resp = await self.invoke_method(opcode=288, payload={})
         return resp
