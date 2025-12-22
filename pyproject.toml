@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vkmax-async"
-version = "2.1.2"
+version = "2.1.3"
 description = "Python client for MAX messenger"
 readme = "README.md"
 authors = [{ name = "Anastasia Tomson", email = "anastasia.tomson@mail.ru" }]
